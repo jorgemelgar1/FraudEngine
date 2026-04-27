@@ -1,10 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="container" style={{ paddingTop: '5rem' }} />}>
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+function LoginForm() {
   const search = useSearchParams();
   const initialError =
     search.get('error') === 'domain'
