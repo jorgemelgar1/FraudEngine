@@ -56,17 +56,54 @@ You'll do this once. The order matters.
 4. You should see "Success. No rows returned." If you see errors, copy them and
    share them — the script is idempotent so you can re-run safely.
 
-### 3. Configure Supabase Auth
+### 3. Configure Supabase Auth (Google OAuth via Cubo Workspace)
 
-1. Go to **Authentication → Providers → Email**.
-2. Make sure **Email** is enabled. Disable "Confirm email" if you want
-   one-click magic-link sign-in.
-3. Go to **Authentication → URL Configuration**.
-4. Set **Site URL** to your Vercel deployment URL (e.g.
-   `https://cubo-fraud-engine.vercel.app`). For local dev, use
-   `http://localhost:3000`.
-5. Add `https://cubo-fraud-engine.vercel.app/auth/callback` (and the
-   localhost equivalent) to **Redirect URLs**.
+This app uses Google sign-in restricted to your Google Workspace
+(`@cubopago.com`). You need to register the app with Google once, then
+plug those credentials into Supabase.
+
+#### 3a. Create the Google OAuth client
+
+1. Go to <https://console.cloud.google.com> while signed in with a
+   `@cubopago.com` account.
+2. Top bar → project selector → create or select a project inside the
+   **Cubo Pago organization** (not a personal one — this matters for the
+   "Internal" restriction below).
+3. Left sidebar → **APIs & Services → OAuth consent screen**:
+   - **User Type:** **Internal** (only available because the project lives
+     in the Workspace org). This automatically restricts sign-in to
+     `@cubopago.com` accounts at Google's level — no one else can even
+     attempt to authenticate.
+   - **App name:** `Cubo Fraud Engine`
+   - **User support email:** your Cubo email
+   - **Developer contact:** your Cubo email
+   - Save & continue. You can skip the Scopes and Test Users screens.
+4. Left sidebar → **APIs & Services → Credentials → Create Credentials →
+   OAuth client ID**:
+   - **Application type:** Web application
+   - **Name:** `Cubo Fraud Engine Web`
+   - **Authorized redirect URIs:** add the URL Supabase shows you on the
+     Google provider page in the next step. It will look like
+     `https://YOUR-PROJECT.supabase.co/auth/v1/callback`.
+   - Save.
+5. A modal appears with **Client ID** and **Client Secret**. Copy both
+   somewhere safe — you'll paste them into Supabase next.
+
+#### 3b. Enable Google in Supabase
+
+1. In Supabase: **Authentication → Providers → Google → enable**.
+2. Paste the Client ID and Client Secret from the previous step.
+3. Save.
+
+#### 3c. Set the redirect URLs
+
+1. Supabase: **Authentication → URL Configuration**.
+2. **Site URL:** your Vercel deployment URL
+   (e.g., `https://fraud-engine.vercel.app`). For local dev,
+   use `http://localhost:3000`.
+3. **Redirect URLs:** add both:
+   - `https://fraud-engine.vercel.app/auth/callback`
+   - `http://localhost:3000/auth/callback` (for local dev only)
 
 ### 4. Grab your Supabase credentials
 
@@ -108,10 +145,11 @@ gh repo create cubo-fraud-engine --private --source=. --push
 ### 7. Test it
 
 1. Visit your deployment URL.
-2. Sign in with your `@cubopago.com` email.
-3. Click the magic link in your inbox.
-4. Drop a small daily CSV.
-5. You should see a report within a few seconds.
+2. Click **Sign in with Google**.
+3. Pick your `@cubopago.com` Google account.
+4. You'll land on the upload page.
+5. Drop a small daily CSV.
+6. You should see a report within a few seconds.
 
 ---
 
