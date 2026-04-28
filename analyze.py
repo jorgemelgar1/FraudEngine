@@ -186,8 +186,16 @@ def load_and_dedupe(csv_path):
     """
     Load the CSV and deduplicate to one row per transaction_id
     (keeping the final status transition).
+
+    Schema is validated immediately after the CSV is parsed and before any
+    columns are touched — otherwise a missing required column raises
+    KeyError from inside pd.to_datetime instead of the friendly
+    "Missing required columns" error.
     """
     df = pd.read_csv(csv_path, low_memory=False)
+    ok, missing_req, _ = validate_schema(df)
+    if not ok:
+        raise ValueError(f"Missing required columns: {missing_req}")
     df['last_intent_at'] = pd.to_datetime(df['last_intent_at'], errors='coerce')
     df['transaction_created_at'] = pd.to_datetime(df['transaction_created_at'], errors='coerce')
     df = df.sort_values(['transaction_id', 'last_intent_at'])
@@ -871,12 +879,8 @@ def update_watchlist(wl, critical_findings, date_str):
 # ---------------------------------------------------------------------------
 
 def analyze(csv_path, watchlist_path=None):
+    # Schema is validated inside load_and_dedupe before any columns get touched.
     df_raw, df_u = load_and_dedupe(csv_path)
-
-    # Schema check
-    ok, missing_req, _ = validate_schema(df_raw)
-    if not ok:
-        raise ValueError(f"Missing required columns: {missing_req}")
 
     # Watchlist — both merchants and cards persist permanently once flagged.
     watchlist = load_watchlist(watchlist_path) if watchlist_path else {'merchants': {}, 'cards': {}}

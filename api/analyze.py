@@ -150,9 +150,15 @@ def sb_rest(method: str, path: str, body=None, prefer: str = ''):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_watchlist_from_supabase() -> dict:
-    """Build the same dict shape analyze.py expects from the two SQL tables."""
-    merchants = sb_rest('GET', 'watchlist_merchants?select=*') or []
-    cards     = sb_rest('GET', 'watchlist_cards?select=*') or []
+    """Build the same dict shape analyze.py expects from the two SQL tables.
+
+    The explicit limit overrides PostgREST's 1000-row default — without it,
+    older watchlist entries silently drop off and the fraud detectors lose
+    their 'is this a known offender?' signal once the watchlist grows past
+    1000 rows.
+    """
+    merchants = sb_rest('GET', 'watchlist_merchants?select=*&limit=100000') or []
+    cards     = sb_rest('GET', 'watchlist_cards?select=*&limit=100000') or []
 
     wl = {'merchants': {}, 'cards': {}}
     for m in merchants:
@@ -255,19 +261,40 @@ def insert_findings_history(run_id: str, findings: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_multipart(body: bytes, boundary: bytes):
-    """Minimal multipart/form-data parser — extracts the first file part as bytes."""
+    """Minimal multipart/form-data parser — extracts the first file part as bytes.
+
+    Hardenings vs. naive split:
+    - Tolerates the leading CRLF that spec-compliant bodies put before each
+      boundary delimiter.
+    - Strips the closing '--' of the final boundary if it ends up on the part.
+    - Caller is expected to have already stripped surrounding quotes from the
+      boundary token (RFC permits `boundary="abc"`).
+    """
     sep = b'--' + boundary
     parts = body.split(sep)
     for part in parts:
         if b'filename=' not in part:
             continue
+        # Spec-compliant bodies put a CRLF immediately after each delimiter,
+        # so the part begins with \r\n. Strip it if present.
+        if part.startswith(b'\r\n'):
+            part = part[2:]
         try:
             header_end = part.index(b'\r\n\r\n')
         except ValueError:
             continue
         headers = part[:header_end].decode('utf-8', errors='replace')
         content = part[header_end + 4:]
-        if content.endswith(b'\r\n'):
+        # Trailing artifacts from the closing delimiter '\r\n--<boundary>--\r\n'.
+        # After the split on `--<boundary>`, the file content ends with one of:
+        #   '\r\n--'  (end-of-stream marker present, last part)
+        #   '\r\n'    (regular part terminator)
+        #   ''        (truncated body)
+        if content.endswith(b'\r\n--'):
+            content = content[:-4]
+        elif content.endswith(b'\r\n'):
+            content = content[:-2]
+        elif content.endswith(b'--'):
             content = content[:-2]
         filename = 'upload.csv'
         for line in headers.split('\r\n'):
@@ -303,7 +330,10 @@ class handler(BaseHTTPRequestHandler):
             if not content_type.startswith('multipart/form-data'):
                 self._send_json(400, {'error': 'Expected multipart/form-data upload'})
                 return
-            boundary = content_type.split('boundary=')[1].encode('utf-8')
+            # RFC permits `boundary="abc"`; strip optional quotes so the
+            # delimiter we use to split matches what's actually in the body.
+            boundary_raw = content_type.split('boundary=')[1].split(';')[0].strip()
+            boundary = boundary_raw.strip('"').encode('utf-8')
             length = int(self.headers.get('Content-Length', '0'))
             if length <= 0:
                 self._send_json(400, {'error': 'Empty upload'})
