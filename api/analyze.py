@@ -8,6 +8,9 @@ Flow per request:
   4.  Invoke the existing analyze.py exactly as the CLI does.
   5.  Sync the updated watchlist + audit row + findings back to Supabase.
   6.  Return the findings JSON to the browser. The CSV is never persisted.
+
+All Supabase access goes through urllib (no supabase-py) so this works
+with both legacy 'eyJ...' JWT keys and the newer 'sb_secret_...' format.
 """
 
 import json
@@ -22,8 +25,6 @@ from http.server import BaseHTTPRequestHandler
 # Make the project-root analyze.py importable.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import analyze as fraud_engine  # noqa: E402
-
-from supabase import create_client, Client  # noqa: E402
 
 
 SUPABASE_URL          = os.environ.get('NEXT_PUBLIC_SUPABASE_URL', '')
@@ -40,15 +41,12 @@ def verify_user(auth_header):
     """Return (user_id, email) on success; raise ValueError otherwise.
 
     Calls Supabase's /auth/v1/user endpoint directly via urllib so the raw
-    error response is visible if validation fails — easier to debug than
-    supabase-py's wrapped exceptions.
+    error response is visible if validation fails.
     """
     if not auth_header or not auth_header.startswith('Bearer '):
         raise ValueError('Missing bearer token')
     token = auth_header[len('Bearer '):]
 
-    # Surface env-var problems clearly instead of letting them turn into
-    # cryptic "Invalid API key" responses from Supabase.
     if not SUPABASE_URL:
         raise ValueError('Server config: NEXT_PUBLIC_SUPABASE_URL not set in Vercel')
     if not SUPABASE_ANON_KEY:
@@ -57,9 +55,6 @@ def verify_user(auth_header):
             '(this is the same value the frontend uses)'
         )
 
-    # Hint about the key shape so config typos surface in the error message.
-    # Only the first 6 chars — enough to distinguish "eyJh..." (legacy JWT
-    # format) from "sb_pu..." (new format) without leaking the secret.
     key_hint = SUPABASE_ANON_KEY[:6] + '...'
 
     req = urllib.request.Request(
@@ -90,7 +85,6 @@ def verify_user(auth_header):
     user_id = user.get('id')
     if not email or not user_id:
         raise ValueError('Token missing email or user id in /auth/v1/user response')
-    # Exact-suffix check: reject crafted addresses like "evil@x.com@cubopago.com".
     parts = email.split('@')
     if len(parts) != 2 or parts[1] != ALLOWED_EMAIL_DOMAIN:
         raise ValueError(f'Email domain not allowed (must be @{ALLOWED_EMAIL_DOMAIN})')
@@ -98,30 +92,58 @@ def verify_user(auth_header):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Supabase ↔ watchlist dict
+# Supabase REST (PostgREST) — direct urllib calls, no supabase-py
 # ─────────────────────────────────────────────────────────────────────────────
 
-def supabase_client() -> Client:
+def sb_rest(method: str, path: str, body=None, prefer: str = ''):
+    """Direct call to Supabase's PostgREST endpoint at /rest/v1/<path>.
+
+    Bypasses supabase-py so we work with both legacy 'eyJ...' and new
+    'sb_secret_...' service-role key formats.
+    """
+    if not SUPABASE_URL:
+        raise RuntimeError('Server config: NEXT_PUBLIC_SUPABASE_URL not set in Vercel')
     if not SUPABASE_SERVICE_KEY:
-        raise RuntimeError(
-            'Server config: SUPABASE_SERVICE_ROLE_KEY not set in Vercel'
-        )
+        raise RuntimeError('Server config: SUPABASE_SERVICE_ROLE_KEY not set in Vercel')
+
+    url = f'{SUPABASE_URL.rstrip("/")}/rest/v1/{path}'
+    headers = {
+        'apikey':        SUPABASE_SERVICE_KEY,
+        'Authorization': f'Bearer {SUPABASE_SERVICE_KEY}',
+        'Content-Type':  'application/json',
+    }
+    if prefer:
+        headers['Prefer'] = prefer
+
+    data = json.dumps(body, default=str).encode('utf-8') if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
     try:
-        return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-    except Exception as e:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            content = resp.read()
+            if not content:
+                return None
+            return json.loads(content)
+    except urllib.error.HTTPError as e:
+        try:
+            body_text = e.read().decode('utf-8', errors='replace')[:300]
+        except Exception:
+            body_text = '(no body)'
         key_hint = SUPABASE_SERVICE_KEY[:6] + '...'
         raise RuntimeError(
-            f'SUPABASE_SERVICE_ROLE_KEY rejected by supabase-py (prefix {key_hint}): {e}. '
-            f'If the key starts with "sb_" (new format), use the legacy JWT-format '
-            f'service_role key instead — Supabase → Settings → API → Legacy API keys, '
-            f'starts with "eyJ".'
+            f'Supabase REST {method} {path} failed '
+            f'(HTTP {e.code}, service key prefix {key_hint}): {body_text}'
         )
 
 
-def load_watchlist_from_supabase(sb: Client) -> dict:
+# ─────────────────────────────────────────────────────────────────────────────
+# Watchlist + audit + findings sync
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_watchlist_from_supabase() -> dict:
     """Build the same dict shape analyze.py expects from the two SQL tables."""
-    merchants = sb.table('watchlist_merchants').select('*').execute().data or []
-    cards     = sb.table('watchlist_cards').select('*').execute().data or []
+    merchants = sb_rest('GET', 'watchlist_merchants?select=*') or []
+    cards     = sb_rest('GET', 'watchlist_cards?select=*') or []
 
     wl = {'merchants': {}, 'cards': {}}
     for m in merchants:
@@ -142,7 +164,7 @@ def load_watchlist_from_supabase(sb: Client) -> dict:
     return wl
 
 
-def sync_watchlist_to_supabase(sb: Client, wl: dict, run_id: str):
+def sync_watchlist_to_supabase(wl: dict, run_id: str):
     """Upsert merchants + cards. Permanent: never deletes."""
     if wl.get('merchants'):
         rows = [{
@@ -154,7 +176,8 @@ def sync_watchlist_to_supabase(sb: Client, wl: dict, run_id: str):
             'last_risk_score': int(entry.get('last_risk_score', 0) or 0),
             'last_run_id':     run_id,
         } for name, entry in wl['merchants'].items()]
-        sb.table('watchlist_merchants').upsert(rows, on_conflict='company_name').execute()
+        sb_rest('POST', 'watchlist_merchants',
+                body=rows, prefer='resolution=merge-duplicates')
 
     if wl.get('cards'):
         rows = []
@@ -172,10 +195,11 @@ def sync_watchlist_to_supabase(sb: Client, wl: dict, run_id: str):
                 'last_run_id':   run_id,
             })
         if rows:
-            sb.table('watchlist_cards').upsert(rows, on_conflict='bin,last4').execute()
+            sb_rest('POST', 'watchlist_cards',
+                    body=rows, prefer='resolution=merge-duplicates')
 
 
-def insert_run_audit(sb: Client, user_id: str, email: str, csv_filename: str, findings: dict) -> str:
+def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict) -> str:
     summary = findings.get('summary', {})
     payload = {
         'run_by_email':            email,
@@ -190,11 +214,14 @@ def insert_run_audit(sb: Client, user_id: str, email: str, csv_filename: str, fi
         'chargeback_exposure_usd': summary.get('estimated_chargeback_exposure'),
         'summary':                 summary,
     }
-    res = sb.table('analysis_runs').insert(payload).execute()
-    return res.data[0]['id']
+    res = sb_rest('POST', 'analysis_runs',
+                  body=payload, prefer='return=representation')
+    if not res or len(res) == 0:
+        raise RuntimeError('analysis_runs insert returned no row')
+    return res[0]['id']
 
 
-def insert_findings_history(sb: Client, run_id: str, findings: dict):
+def insert_findings_history(run_id: str, findings: dict):
     rows = []
     for f in findings.get('critical_findings', []) + findings.get('monitor_findings', []):
         rows.append({
@@ -211,7 +238,7 @@ def insert_findings_history(sb: Client, run_id: str, findings: dict):
             'payload':                 f,
         })
     if rows:
-        sb.table('findings_history').insert(rows).execute()
+        sb_rest('POST', 'findings_history', body=rows)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,8 +299,7 @@ class handler(BaseHTTPRequestHandler):
 
             filename, csv_bytes = parse_multipart(body, boundary)
 
-            sb = supabase_client()
-            wl = load_watchlist_from_supabase(sb)
+            wl = load_watchlist_from_supabase()
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 csv_path = os.path.join(tmpdir, 'input.csv')
@@ -288,9 +314,9 @@ class handler(BaseHTTPRequestHandler):
                 with open(wl_path) as f:
                     updated_wl = json.load(f)
 
-            run_id = insert_run_audit(sb, user_id, email, filename, findings)
-            sync_watchlist_to_supabase(sb, updated_wl, run_id)
-            insert_findings_history(sb, run_id, findings)
+            run_id = insert_run_audit(user_id, email, filename, findings)
+            sync_watchlist_to_supabase(updated_wl, run_id)
+            insert_findings_history(run_id, findings)
 
             findings['run_id'] = run_id
             self._send_json(200, findings)
@@ -302,10 +328,8 @@ class handler(BaseHTTPRequestHandler):
             err_module = type(e).__module__ or ''
             msg = str(e)[:400]
             # Surface details for safe-to-show types: our own RuntimeErrors
-            # (config issues with explicit, sanitized messages) and exceptions
-            # from Supabase/Postgrest/GoTrue (auth/db errors that don't
-            # contain CSV data). Pandas/numpy errors stay generic since their
-            # messages can include row values.
+            # (config issues with explicit, sanitized messages). Pandas/numpy
+            # errors stay generic since their messages can include row values.
             safe_to_surface = (
                 err_type == 'RuntimeError'
                 or 'supabase' in err_module
