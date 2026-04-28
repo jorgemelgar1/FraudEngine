@@ -25,6 +25,7 @@ from supabase import create_client, Client  # noqa: E402
 
 
 SUPABASE_URL          = os.environ.get('NEXT_PUBLIC_SUPABASE_URL', '')
+SUPABASE_ANON_KEY     = os.environ.get('NEXT_PUBLIC_SUPABASE_ANON_KEY', '')
 SUPABASE_SERVICE_KEY  = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 ALLOWED_EMAIL_DOMAIN  = os.environ.get('ALLOWED_EMAIL_DOMAIN', 'cubopago.com').lower()
 
@@ -45,8 +46,11 @@ def verify_user(auth_header):
         raise ValueError('Missing bearer token')
     token = auth_header[len('Bearer '):]
 
+    # Use the anon key (not service role) for auth validation. The anon key
+    # is the same one the frontend uses successfully, so we know it's correct;
+    # auth validation only needs anon-level access regardless.
     try:
-        sb = supabase_client()
+        sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
         user_response = sb.auth.get_user(token)
     except Exception as e:
         raise ValueError(f'Invalid token: {e}')
