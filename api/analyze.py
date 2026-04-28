@@ -55,7 +55,9 @@ def verify_user(auth_header):
     user_id = claims.get('sub')
     if not email or not user_id:
         raise ValueError('Token missing email or user id')
-    if not email.endswith('@' + ALLOWED_EMAIL_DOMAIN):
+    # Exact-suffix check: reject crafted addresses like "evil@x.com@cubopago.com".
+    parts = email.split('@')
+    if len(parts) != 2 or parts[1] != ALLOWED_EMAIL_DOMAIN:
         raise ValueError(f'Email domain not allowed (must be @{ALLOWED_EMAIL_DOMAIN})')
     return user_id, email
 
@@ -246,5 +248,10 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(200, findings)
 
         except Exception as e:
+            # Full trace stays in Vercel server logs. Only the exception class
+            # name is returned to the client — the message could contain
+            # CSV-derived values (e.g., "could not parse '4111-...' as int").
             traceback.print_exc()
-            self._send_json(500, {'error': f'{type(e).__name__}: {e}'})
+            self._send_json(500, {
+                'error': f'Internal error ({type(e).__name__}). Check Vercel function logs for details.',
+            })

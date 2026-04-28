@@ -40,7 +40,9 @@ export async function middleware(request: NextRequest) {
   }
   if (user) {
     const email = (user.email || '').toLowerCase();
-    if (!email.endsWith('@' + ALLOWED_DOMAIN)) {
+    // Exact-suffix check: reject crafted addresses like "evil@x.com@cubopago.com".
+    const parts = email.split('@');
+    if (parts.length !== 2 || parts[1] !== ALLOWED_DOMAIN) {
       await supabase.auth.signOut();
       return NextResponse.redirect(new URL('/login?error=domain', request.url));
     }
