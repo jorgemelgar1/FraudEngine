@@ -48,9 +48,15 @@ function LoginForm() {
 
   return (
     <div className="container" style={{ maxWidth: 440, paddingTop: '5rem' }}>
-      <div className="card">
-        <h1 style={{ marginTop: 0 }}>Cubo Fraud Engine</h1>
-        <p className="muted">Sign in with your Cubo Pago Google account.</p>
+      <div className="card" style={{ textAlign: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.25rem' }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/cubo-logo.png" alt="Cubo" style={{ height: 40 }} />
+        </div>
+        <h1 style={{ margin: '0 0 0.4rem 0', fontSize: '1.4rem' }}>Fraud Engine</h1>
+        <p className="muted" style={{ marginBottom: '1.5rem' }}>
+          Sign in with your Cubo Pago Google account.
+        </p>
 
         {error && <div className="error">{error}</div>}
 

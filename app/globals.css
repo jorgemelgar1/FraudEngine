@@ -1,3 +1,55 @@
+/*
+ * Cubo Pago — BrandBook 2026 design tokens applied to the Fraud Engine UI.
+ * Master brand styling (this is a multi-product internal tool, not a single
+ * product like cubogo or cuboadmin), so the master palette is foregrounded:
+ * teal (Tranquilidad), navy (Elegancia), off-white (Neutralidad), with blue
+ * as the accent. Severity colors (red/orange) are introduced only where
+ * functionally required — fraud findings need a danger signal that the
+ * brand palette doesn't provide on its own.
+ */
+
+:root {
+  /* Cubo brand colors */
+  --cubo-teal:   #00C9A7;
+  --cubo-blue:   #0066FF;
+  --cubo-orange: #FF6B35;
+  --cubo-yellow: #F4D03F;
+  --cubo-purple: #4C3175;
+  --cubo-navy:   #2C3E50;
+  --cubo-white:  #F8F9FA;
+
+  /* Semantic aliases */
+  --bg:          var(--cubo-white);
+  --surface:     #FFFFFF;
+  --text:        var(--cubo-navy);
+  --text-muted:  #6B7280;
+  --border:      #E5E7EB;
+  --primary:     var(--cubo-teal);
+  --accent:      var(--cubo-blue);
+
+  /* Severity (semantic — red/amber retained because the brand has no danger color) */
+  --critical:    #DC2626;
+  --monitor:     var(--cubo-orange);
+
+  /* Fonts */
+  --font-title:    'Sora', system-ui, -apple-system, sans-serif;
+  --font-body:     'Inter', system-ui, -apple-system, sans-serif;
+  --font-ui:       'Mulish', system-ui, -apple-system, sans-serif;
+
+  /* Shape system — "right angles + rounded corners" motif */
+  --radius-sm:   8px;
+  --radius-md:  12px;
+  --radius-lg:  16px;
+  --radius-xl:  24px;
+  --radius-2xl: 32px;
+  --radius-full: 9999px;
+
+  /* Subtle shadows tinted with brand navy */
+  --shadow-sm: 0 1px 2px 0 rgba(44, 62, 80, 0.05);
+  --shadow-md: 0 4px 12px -2px rgba(44, 62, 80, 0.08);
+  --shadow-lg: 0 12px 32px -8px rgba(44, 62, 80, 0.12);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -6,26 +58,44 @@ html,
 body {
   margin: 0;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
-    "Helvetica Neue", sans-serif;
-  background: #0f172a;
-  color: #e2e8f0;
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-title);
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+h1 { font-weight: 700; font-size: 2rem; }
+h2 { font-weight: 600; font-size: 1.5rem; }
+h3 { font-weight: 600; font-size: 1.15rem; }
+
 a {
-  color: #60a5fa;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
 }
 
 button {
-  font-family: inherit;
+  font-family: var(--font-ui);
   cursor: pointer;
 }
 
 input,
 textarea {
-  font-family: inherit;
+  font-family: var(--font-ui);
 }
+
+/* ───────────────────────── Layout ───────────────────────── */
 
 .container {
   max-width: 960px;
@@ -33,144 +103,231 @@ textarea {
   padding: 2rem 1.5rem;
 }
 
-.card {
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 10px;
-  padding: 1.5rem;
-  margin-bottom: 1rem;
-}
-
-.btn {
-  background: #2563eb;
-  color: white;
-  border: none;
-  padding: 0.7rem 1.4rem;
-  border-radius: 8px;
-  font-size: 1rem;
-  font-weight: 500;
-  transition: background 0.15s;
-}
-
-.btn:hover:not(:disabled) {
-  background: #1d4ed8;
-}
-
-.btn:disabled {
-  background: #475569;
-  cursor: not-allowed;
-}
-
-.input {
-  width: 100%;
-  padding: 0.7rem 0.9rem;
-  font-size: 1rem;
-  background: #0f172a;
-  border: 1px solid #475569;
-  border-radius: 8px;
-  color: #e2e8f0;
-}
-
-.input:focus {
-  outline: none;
-  border-color: #2563eb;
-}
-
-.dropzone {
-  border: 2px dashed #475569;
-  border-radius: 12px;
-  padding: 3rem 1.5rem;
-  text-align: center;
-  transition: border-color 0.15s, background 0.15s;
-  cursor: pointer;
-}
-
-.dropzone.active {
-  border-color: #60a5fa;
-  background: rgba(96, 165, 250, 0.08);
-}
-
-.muted {
-  color: #94a3b8;
-  font-size: 0.92rem;
-}
-
-.error {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.08);
-  border: 1px solid rgba(248, 113, 113, 0.3);
-  padding: 0.6rem 0.9rem;
-  border-radius: 8px;
-  margin: 0.75rem 0;
-}
-
-.success {
-  color: #34d399;
-}
-
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 0.75rem;
-}
-
-.kpi {
-  background: #0f172a;
-  border: 1px solid #334155;
-  padding: 0.85rem 1rem;
-  border-radius: 8px;
-}
-
-.kpi-label {
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #94a3b8;
-  margin-bottom: 0.25rem;
-}
-
-.kpi-value {
-  font-size: 1.5rem;
-  font-weight: 600;
-}
-
-.finding {
-  border-left: 3px solid #ef4444;
-  padding: 0.75rem 1rem;
-  margin-bottom: 0.75rem;
-  background: rgba(239, 68, 68, 0.05);
-  border-radius: 0 6px 6px 0;
-}
-
-.finding.monitor {
-  border-left-color: #f59e0b;
-  background: rgba(245, 158, 11, 0.05);
-}
-
-.tag {
-  display: inline-block;
-  background: #334155;
-  color: #cbd5e1;
-  padding: 0.15rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  margin-right: 0.3rem;
-  margin-top: 0.3rem;
-}
-
 header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 1rem 1.5rem;
-  border-bottom: 1px solid #334155;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
 
+header .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+header .brand img {
+  height: 32px;
+  width: auto;
+  display: block;
+}
+
+header .brand .product {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  padding-left: 0.85rem;
+  border-left: 1px solid var(--border);
+}
+
+/* ───────────────────────── Cards ───────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  padding: 1.75rem;
+  margin-bottom: 1rem;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ───────────────────────── Buttons ───────────────────────── */
+
+.btn {
+  background: var(--primary);
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: var(--radius-lg);
+  font-family: var(--font-ui);
+  font-size: 1rem;
+  font-weight: 700;
+  transition: background 0.15s, transform 0.05s;
+}
+
+.btn:hover:not(:disabled) {
+  background: #00B395; /* teal, ~10% darker */
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  background: #9CA3AF;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.55rem 1.1rem;
+  border-radius: var(--radius-md);
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--text-muted);
+  background: var(--bg);
+}
+
+/* ───────────────────────── Inputs ───────────────────────── */
+
+.input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  font-size: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-family: var(--font-ui);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(0, 201, 167, 0.15);
+}
+
+/* ───────────────────────── Dropzone ───────────────────────── */
+
+.dropzone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-2xl);
+  padding: 3rem 1.5rem;
+  text-align: center;
+  background: var(--bg);
+  transition: border-color 0.15s, background 0.15s;
+  cursor: pointer;
+}
+
+.dropzone.active {
+  border-color: var(--primary);
+  background: rgba(0, 201, 167, 0.06);
+}
+
+/* ───────────────────────── Utility text ───────────────────────── */
+
+.muted {
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.error {
+  color: var(--critical);
+  background: rgba(220, 38, 38, 0.06);
+  border: 1px solid rgba(220, 38, 38, 0.25);
+  padding: 0.7rem 0.95rem;
+  border-radius: var(--radius-md);
+  margin: 0.75rem 0;
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+}
+
+.success {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+/* ───────────────────────── KPI tiles ───────────────────────── */
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.85rem;
+}
+
+.kpi {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 1rem 1.15rem;
+  border-radius: var(--radius-lg);
+}
+
+.kpi-label {
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.kpi-value {
+  font-family: var(--font-title);
+  font-size: 1.65rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* ───────────────────────── Findings ───────────────────────── */
+
+.finding {
+  border-left: 4px solid var(--critical);
+  padding: 0.9rem 1.15rem;
+  margin-bottom: 0.75rem;
+  background: rgba(220, 38, 38, 0.04);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.finding.monitor {
+  border-left-color: var(--monitor);
+  background: rgba(255, 107, 53, 0.05);
+}
+
+.finding strong {
+  font-family: var(--font-title);
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ───────────────────────── Tags ───────────────────────── */
+
+.tag {
+  display: inline-block;
+  background: rgba(0, 102, 255, 0.1);
+  color: var(--accent);
+  padding: 0.18rem 0.65rem;
+  border-radius: var(--radius-full);
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-right: 0.3rem;
+  margin-top: 0.3rem;
+}
+
+/* Sign-out button — alias of btn-secondary so existing markup keeps working */
 header .signout {
-  background: transparent;
-  border: 1px solid #475569;
-  color: #cbd5e1;
-  padding: 0.45rem 0.9rem;
-  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-md);
+  font-family: var(--font-ui);
   font-size: 0.88rem;
+  font-weight: 600;
+}
+
+header .signout:hover {
+  border-color: var(--text-muted);
+  background: var(--bg);
 }

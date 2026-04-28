@@ -108,7 +108,11 @@ export default function HomePage() {
   return (
     <>
       <header>
-        <strong>Cubo Fraud Engine</strong>
+        <div className="brand">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/cubo-logo.png" alt="Cubo" />
+          <span className="product">Fraud Engine</span>
+        </div>
         <button className="signout" onClick={signOut}>
           Sign out
         </button>
