@@ -21,13 +21,11 @@ from http.server import BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import analyze as fraud_engine  # noqa: E402
 
-import jwt  # PyJWT
 from supabase import create_client, Client  # noqa: E402
 
 
 SUPABASE_URL          = os.environ.get('NEXT_PUBLIC_SUPABASE_URL', '')
 SUPABASE_SERVICE_KEY  = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
-SUPABASE_JWT_SECRET   = os.environ.get('SUPABASE_JWT_SECRET', '')
 ALLOWED_EMAIL_DOMAIN  = os.environ.get('ALLOWED_EMAIL_DOMAIN', 'cubopago.com').lower()
 
 
@@ -36,23 +34,29 @@ ALLOWED_EMAIL_DOMAIN  = os.environ.get('ALLOWED_EMAIL_DOMAIN', 'cubopago.com').l
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verify_user(auth_header):
-    """Return (user_id, email) on success; raise ValueError otherwise."""
+    """Return (user_id, email) on success; raise ValueError otherwise.
+
+    Delegates JWT validation to Supabase's /auth/v1/user endpoint via the
+    supabase-py client. Supabase always knows its own signing keys, so this
+    works regardless of the project's signing algorithm (HS256 on legacy
+    projects, ES256/RS256 on newer ones, anything Supabase rolls out next).
+    """
     if not auth_header or not auth_header.startswith('Bearer '):
         raise ValueError('Missing bearer token')
     token = auth_header[len('Bearer '):]
 
     try:
-        claims = jwt.decode(
-            token,
-            SUPABASE_JWT_SECRET,
-            algorithms=['HS256'],
-            audience='authenticated',
-        )
-    except jwt.PyJWTError as e:
+        sb = supabase_client()
+        user_response = sb.auth.get_user(token)
+    except Exception as e:
         raise ValueError(f'Invalid token: {e}')
 
-    email = (claims.get('email') or '').lower()
-    user_id = claims.get('sub')
+    user = getattr(user_response, 'user', None)
+    if user is None:
+        raise ValueError('Invalid token: no user returned')
+
+    email = ((user.email or '') if hasattr(user, 'email') else '').lower()
+    user_id = getattr(user, 'id', None)
     if not email or not user_id:
         raise ValueError('Token missing email or user id')
     # Exact-suffix check: reject crafted addresses like "evil@x.com@cubopago.com".

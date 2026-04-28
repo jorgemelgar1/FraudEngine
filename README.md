@@ -114,7 +114,6 @@ In Supabase, go to **Project Settings → API**. You'll need four values:
 | `NEXT_PUBLIC_SUPABASE_URL` | "Project URL" |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | "Project API keys → anon public" |
 | `SUPABASE_SERVICE_ROLE_KEY` | "Project API keys → service_role" — **secret, never expose to browser** |
-| `SUPABASE_JWT_SECRET` | **Project Settings → API → JWT Settings → JWT Secret** |
 
 ### 5. Push this repo to GitHub
 
@@ -132,11 +131,10 @@ gh repo create cubo-fraud-engine --private --source=. --push
 1. Go to <https://vercel.com>, click **Add New → Project**.
 2. Import your GitHub repo.
 3. Framework preset: **Next.js** (auto-detected).
-4. **Environment Variables** — paste in all five from `.env.example`:
+4. **Environment Variables** — paste in all four from `.env.example`:
     - `NEXT_PUBLIC_SUPABASE_URL`
     - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
     - `SUPABASE_SERVICE_ROLE_KEY`
-    - `SUPABASE_JWT_SECRET`
     - `ALLOWED_EMAIL_DOMAIN` (e.g., `cubopago.com`)
 5. Click **Deploy**. First build takes ~2 minutes.
 6. Once deployed, go back to Supabase **Auth → URL Configuration** and update
