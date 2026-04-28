@@ -20,6 +20,7 @@ import tempfile
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler
 
 # Make the project-root analyze.py importable.
@@ -31,6 +32,14 @@ SUPABASE_URL          = os.environ.get('NEXT_PUBLIC_SUPABASE_URL', '')
 SUPABASE_ANON_KEY     = os.environ.get('NEXT_PUBLIC_SUPABASE_ANON_KEY', '')
 SUPABASE_SERVICE_KEY  = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 ALLOWED_EMAIL_DOMAIN  = os.environ.get('ALLOWED_EMAIL_DOMAIN', 'cubopago.com').lower()
+
+
+class ConfigError(RuntimeError):
+    """Configuration / infrastructure error whose message is safe to return
+    to the client. Use this for env-var misconfiguration, Supabase REST
+    failures, schema mismatches, and similar — never for anything where the
+    message could contain CSV-derived row data."""
+    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,9 +111,9 @@ def sb_rest(method: str, path: str, body=None, prefer: str = ''):
     'sb_secret_...' service-role key formats.
     """
     if not SUPABASE_URL:
-        raise RuntimeError('Server config: NEXT_PUBLIC_SUPABASE_URL not set in Vercel')
+        raise ConfigError('Server config: NEXT_PUBLIC_SUPABASE_URL not set in Vercel')
     if not SUPABASE_SERVICE_KEY:
-        raise RuntimeError('Server config: SUPABASE_SERVICE_ROLE_KEY not set in Vercel')
+        raise ConfigError('Server config: SUPABASE_SERVICE_ROLE_KEY not set in Vercel')
 
     url = f'{SUPABASE_URL.rstrip("/")}/rest/v1/{path}'
     headers = {
@@ -130,7 +139,7 @@ def sb_rest(method: str, path: str, body=None, prefer: str = ''):
         except Exception:
             body_text = '(no body)'
         key_hint = SUPABASE_SERVICE_KEY[:6] + '...'
-        raise RuntimeError(
+        raise ConfigError(
             f'Supabase REST {method} {path} failed '
             f'(HTTP {e.code}, service key prefix {key_hint}): {body_text}'
         )
@@ -217,7 +226,7 @@ def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict
     res = sb_rest('POST', 'analysis_runs',
                   body=payload, prefer='return=representation')
     if not res or len(res) == 0:
-        raise RuntimeError('analysis_runs insert returned no row')
+        raise ConfigError('analysis_runs insert returned no row')
     return res[0]['id']
 
 
@@ -285,6 +294,10 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(401, {'error': str(e)})
             return
 
+        # Per-request id used to correlate sanitized client-side errors with
+        # the (intentionally minimal) server log line for the same request.
+        request_id = uuid.uuid4().hex[:8]
+
         try:
             content_type = self.headers.get('Content-Type', '')
             if not content_type.startswith('multipart/form-data'):
@@ -309,7 +322,23 @@ class handler(BaseHTTPRequestHandler):
                 with open(wl_path, 'w') as f:
                     json.dump(wl, f, default=str)
 
-                findings = fraud_engine.analyze(csv_path, watchlist_path=wl_path)
+                # Wrap the pandas/numpy analysis in a tight try/except.
+                # Pandas exceptions can embed CSV row values in their messages
+                # and stack traces (e.g., "could not convert '4111...' to int").
+                # We log only the exception type + request id — never the
+                # message and never the traceback — to keep CSV-derived data
+                # out of Vercel function logs.
+                try:
+                    findings = fraud_engine.analyze(csv_path, watchlist_path=wl_path)
+                except Exception as analysis_err:
+                    print(
+                        f'[req {request_id}] Analysis failed: '
+                        f'{type(analysis_err).__name__}'
+                    )
+                    raise ConfigError(
+                        f'CSV analysis failed (ref: {request_id}). '
+                        f'Contact the engineer with this reference.'
+                    )
 
                 with open(wl_path) as f:
                     updated_wl = json.load(f)
@@ -321,24 +350,21 @@ class handler(BaseHTTPRequestHandler):
             findings['run_id'] = run_id
             self._send_json(200, findings)
 
+        except ConfigError as e:
+            # ConfigError is built from sanitized strings (env-var problems,
+            # Supabase REST failures, the analysis-failure ref above). Safe
+            # to surface to the client and useful for debugging. We do NOT
+            # print the traceback — the caller already logged what's needed.
+            self._send_json(500, {'error': f'ConfigError: {e}'})
+
         except Exception as e:
-            # Full trace stays in Vercel server logs.
+            # Anything else: log the trace (only reachable for non-pandas
+            # paths now — auth/multipart/Supabase REST exceptions) and return
+            # a generic message. Pandas errors are caught earlier and never
+            # reach here.
             traceback.print_exc()
             err_type = type(e).__name__
-            err_module = type(e).__module__ or ''
-            msg = str(e)[:400]
-            # Surface details for safe-to-show types: our own RuntimeErrors
-            # (config issues with explicit, sanitized messages). Pandas/numpy
-            # errors stay generic since their messages can include row values.
-            safe_to_surface = (
-                err_type == 'RuntimeError'
-                or 'supabase' in err_module
-                or 'postgrest' in err_module
-                or 'gotrue' in err_module
-            )
-            if safe_to_surface and msg:
-                self._send_json(500, {'error': f'{err_type}: {msg}'})
-            else:
-                self._send_json(500, {
-                    'error': f'Internal error ({err_type}). Check Vercel function logs for details.',
-                })
+            self._send_json(500, {
+                'error': f'Internal error ({err_type}, ref: {request_id}). '
+                         f'Check Vercel function logs.',
+            })
