@@ -1,8 +1,48 @@
 'use client';
 
-import { useState, useRef, DragEvent } from 'react';
+import { useState, useRef, DragEvent, KeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+
+type EvidenceRow = {
+  transaction_id: string;
+  amount: number | null;
+  status: string;
+  rejection_reason: string | null;
+  timestamp: string;
+  card_bin: string | null;
+  card_last_digits: string | null;
+  card_holder: string | null;
+};
+
+type CriticalFinding = {
+  type: string;
+  company_name: string;
+  company_id: string;
+  risk_score: number;
+  confidence: 'Critical';
+  fingerprints: string[];
+  description_es: string;
+  evidence: EvidenceRow[];
+  recommended_action_es: string;
+  action_code: string;
+  estimated_chargeback_exposure: number;
+  total_transactions: number;
+  rejected_count: number;
+  succeeded_count: number;
+};
+
+type MonitorFinding = {
+  type: string;
+  company_name: string;
+  company_id: string;
+  risk_score: number;
+  confidence: 'Monitor';
+  fingerprints: string[];
+  description_es: string;
+  action_code: string;
+  evidence_count: number;
+};
 
 type Findings = {
   run_id?: string;
@@ -18,8 +58,8 @@ type Findings = {
     total_high_risk_score_transactions: number;
     total_foreign_card_velocity_merchants: number;
   };
-  critical_findings: Array<any>;
-  monitor_findings: Array<any>;
+  critical_findings: CriticalFinding[];
+  monitor_findings: MonitorFinding[];
 };
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4 MB — keep under Vercel's 4.5 MB request-body limit.
@@ -34,11 +74,16 @@ export default function HomePage() {
   const [results, setResults] = useState<Findings | null>(null);
 
   async function handleFile(file: File) {
+    if (uploading) return;  // guard against double-click / double-drop racing
     setError('');
     setResults(null);
 
     if (!file.name.toLowerCase().endsWith('.csv')) {
       setError('Please upload a .csv file.');
+      return;
+    }
+    if (file.size === 0) {
+      setError('File is empty.');
       return;
     }
     if (file.size > MAX_FILE_BYTES) {
@@ -52,8 +97,12 @@ export default function HomePage() {
     setUploading(true);
     try {
       const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
+      // Refresh the session right before sending the JWT — guarantees a
+      // non-expired access token even if the page has been idle for hours.
+      // refreshSession() returns a fresh access_token if the refresh token
+      // is still valid; otherwise it errors and we send the user to /login.
+      const { data: { session }, error: refreshErr } = await supabase.auth.refreshSession();
+      if (refreshErr || !session) {
         router.push('/login');
         return;
       }
@@ -102,7 +151,10 @@ export default function HomePage() {
     a.href = url;
     a.download = `findings_${results.summary.date_range.start || 'report'}.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Defer revoke so the browser has actually started the download —
+    // some browsers haven't begun fetching the blob URL synchronously
+    // after .click() returns.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   return (
@@ -116,7 +168,12 @@ export default function HomePage() {
           />
           <span className="product">Fraud Engine</span>
         </div>
-        <button className="signout" onClick={signOut}>
+        <button
+          className="signout"
+          onClick={signOut}
+          disabled={uploading}
+          aria-label={uploading ? 'Sign out (disabled while uploading)' : 'Sign out'}
+        >
           Sign out
         </button>
       </header>
@@ -152,6 +209,10 @@ export default function HomePage() {
 
             <div
               className={`dropzone ${dragActive ? 'active' : ''}`}
+              role="button"
+              tabIndex={uploading ? -1 : 0}
+              aria-label="Upload CSV file"
+              aria-disabled={uploading}
               onDragOver={(e) => {
                 e.preventDefault();
                 if (!uploading) setDragActive(true);
@@ -159,6 +220,13 @@ export default function HomePage() {
               onDragLeave={() => setDragActive(false)}
               onDrop={onDrop}
               onClick={() => !uploading && fileInputRef.current?.click()}
+              onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
+                if (uploading) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
               style={{ opacity: uploading ? 0.5 : 1 }}
             >
               <input
@@ -263,7 +331,18 @@ function Kpi({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-function FindingCard({ finding, tier }: { finding: any; tier: 'critical' | 'monitor' }) {
+function FindingCard({
+  finding,
+  tier,
+}: {
+  finding: CriticalFinding | MonitorFinding;
+  tier: 'critical' | 'monitor';
+}) {
+  // Only critical findings carry a recommended_action_es. Use a type guard
+  // so TypeScript narrows the optional access to the right branch.
+  const action =
+    'recommended_action_es' in finding ? finding.recommended_action_es : undefined;
+
   return (
     <div className={`finding ${tier === 'monitor' ? 'monitor' : ''}`}>
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -272,15 +351,15 @@ function FindingCard({ finding, tier }: { finding: any; tier: 'critical' | 'moni
       </div>
       <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>{finding.description_es}</p>
       <div>
-        {(finding.fingerprints || []).map((fp: string) => (
+        {(finding.fingerprints || []).map((fp) => (
           <span className="tag" key={fp}>
             {fp}
           </span>
         ))}
       </div>
-      {finding.recommended_action_es && (
+      {action && (
         <p className="muted" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
-          <strong>Action:</strong> {finding.recommended_action_es}
+          <strong>Action:</strong> {action}
         </p>
       )}
     </div>

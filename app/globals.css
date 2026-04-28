@@ -31,10 +31,12 @@
   --critical:    #DC2626;
   --monitor:     var(--cubo-orange);
 
-  /* Fonts */
-  --font-title:    'Sora', system-ui, -apple-system, sans-serif;
-  --font-body:     'Inter', system-ui, -apple-system, sans-serif;
-  --font-ui:       'Mulish', system-ui, -apple-system, sans-serif;
+  /* Fonts — the --font-sora / --font-inter / --font-mulish vars are set by
+   * next/font/google in app/layout.tsx (auto-generated unique class names,
+   * self-hosted, no CDN). Fall back to system fonts if they fail to load. */
+  --font-title: var(--font-sora),   system-ui, -apple-system, sans-serif;
+  --font-body:  var(--font-inter),  system-ui, -apple-system, sans-serif;
+  --font-ui:    var(--font-mulish), system-ui, -apple-system, sans-serif;
 
   /* Shape system — "right angles + rounded corners" motif */
   --radius-sm:   8px;

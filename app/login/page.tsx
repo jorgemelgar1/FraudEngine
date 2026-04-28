@@ -28,15 +28,15 @@ function LoginForm() {
     setError('');
     setSigningIn(true);
     const supabase = createClient();
+    // Pre-filter Google's account picker to the configured Workspace domain.
+    // Reads from a public env var so it stays in sync with ALLOWED_EMAIL_DOMAIN
+    // on the server side; falls back to cubopago.com if unset.
+    const hd = process.env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN || 'cubopago.com';
     const { error: err } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
-        queryParams: {
-          // Pre-filter Google's account picker to Cubo Workspace accounts only.
-          // (Defense in depth — middleware also enforces the domain.)
-          hd: 'cubopago.com',
-        },
+        queryParams: { hd },
       },
     });
     if (err) {
