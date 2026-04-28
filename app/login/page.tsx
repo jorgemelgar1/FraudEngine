@@ -47,11 +47,25 @@ function LoginForm() {
   }
 
   return (
-    <div className="container" style={{ maxWidth: 440, paddingTop: '5rem' }}>
+    <div className="container" style={{ maxWidth: 440, paddingTop: '4rem' }}>
       <div className="card" style={{ textAlign: 'center' }}>
-        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1.25rem' }}>
+        {/* Mascot */}
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.75rem' }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/cubo-logo.png" alt="Cubo" style={{ height: 40 }} />
+          <img
+            src="https://buznvtdzsigrtruighzx.supabase.co/storage/v1/object/public/Assets/Cubo%20Holmes.png"
+            alt="Cubo Holmes mascot"
+            style={{ height: 120, width: 'auto' }}
+          />
+        </div>
+        {/* Cubo logo */}
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="https://buznvtdzsigrtruighzx.supabase.co/storage/v1/object/public/Assets/Cubo.png"
+            alt="Cubo"
+            style={{ height: 36, width: 'auto' }}
+          />
         </div>
         <h1 style={{ margin: '0 0 0.4rem 0', fontSize: '1.4rem' }}>Fraud Engine</h1>
         <p className="muted" style={{ marginBottom: '1.5rem' }}>

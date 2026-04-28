@@ -110,7 +110,10 @@ export default function HomePage() {
       <header>
         <div className="brand">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/cubo-logo.png" alt="Cubo" />
+          <img
+            src="https://buznvtdzsigrtruighzx.supabase.co/storage/v1/object/public/Assets/Cubo.png"
+            alt="Cubo"
+          />
           <span className="product">Fraud Engine</span>
         </div>
         <button className="signout" onClick={signOut}>
@@ -121,11 +124,31 @@ export default function HomePage() {
       <div className="container">
         {!results && (
           <div className="card">
-            <h2 style={{ marginTop: 0 }}>Daily transaction analysis</h2>
-            <p className="muted">
-              Drop a CSV exported from Cubo. The file is processed in memory and discarded
-              immediately — only the watchlist is persisted.
-            </p>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '1.5rem',
+                marginBottom: '1.5rem',
+                flexWrap: 'wrap',
+              }}
+            >
+              <div style={{ flex: '1 1 280px' }}>
+                <h2 style={{ marginTop: 0, marginBottom: '0.4rem' }}>
+                  Daily transaction analysis
+                </h2>
+                <p className="muted" style={{ margin: 0 }}>
+                  Drop a CSV exported from Cubo. The file is processed in memory and
+                  discarded immediately — only the watchlist is persisted.
+                </p>
+              </div>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="https://buznvtdzsigrtruighzx.supabase.co/storage/v1/object/public/Assets/Cubo%20Holmes.png"
+                alt="Cubo Holmes mascot"
+                style={{ height: 140, width: 'auto', flex: '0 0 auto' }}
+              />
+            </div>
 
             <div
               className={`dropzone ${dragActive ? 'active' : ''}`}
