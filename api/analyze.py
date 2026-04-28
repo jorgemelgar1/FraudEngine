@@ -102,7 +102,20 @@ def verify_user(auth_header):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def supabase_client() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    if not SUPABASE_SERVICE_KEY:
+        raise RuntimeError(
+            'Server config: SUPABASE_SERVICE_ROLE_KEY not set in Vercel'
+        )
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    except Exception as e:
+        key_hint = SUPABASE_SERVICE_KEY[:6] + '...'
+        raise RuntimeError(
+            f'SUPABASE_SERVICE_ROLE_KEY rejected by supabase-py (prefix {key_hint}): {e}. '
+            f'If the key starts with "sb_" (new format), use the legacy JWT-format '
+            f'service_role key instead — Supabase → Settings → API → Legacy API keys, '
+            f'starts with "eyJ".'
+        )
 
 
 def load_watchlist_from_supabase(sb: Client) -> dict:
@@ -283,10 +296,25 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(200, findings)
 
         except Exception as e:
-            # Full trace stays in Vercel server logs. Only the exception class
-            # name is returned to the client — the message could contain
-            # CSV-derived values (e.g., "could not parse '4111-...' as int").
+            # Full trace stays in Vercel server logs.
             traceback.print_exc()
-            self._send_json(500, {
-                'error': f'Internal error ({type(e).__name__}). Check Vercel function logs for details.',
-            })
+            err_type = type(e).__name__
+            err_module = type(e).__module__ or ''
+            msg = str(e)[:400]
+            # Surface details for safe-to-show types: our own RuntimeErrors
+            # (config issues with explicit, sanitized messages) and exceptions
+            # from Supabase/Postgrest/GoTrue (auth/db errors that don't
+            # contain CSV data). Pandas/numpy errors stay generic since their
+            # messages can include row values.
+            safe_to_surface = (
+                err_type == 'RuntimeError'
+                or 'supabase' in err_module
+                or 'postgrest' in err_module
+                or 'gotrue' in err_module
+            )
+            if safe_to_surface and msg:
+                self._send_json(500, {'error': f'{err_type}: {msg}'})
+            else:
+                self._send_json(500, {
+                    'error': f'Internal error ({err_type}). Check Vercel function logs for details.',
+                })
