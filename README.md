@@ -9,7 +9,7 @@ report. Watchlist persists across runs in Supabase. CSV data is never stored.
 
 ```
 .
-├── analyze.py              ← Original analysis engine — unchanged, still runs as a CLI
+├── analyze.py              ← Original analysis engine — still runs as a CLI
 ├── api/analyze.py          ← Vercel Python function that wraps analyze.py
 ├── app/                    ← Next.js frontend (login + upload UI)
 │   ├── login/page.tsx
@@ -18,11 +18,15 @@ report. Watchlist persists across runs in Supabase. CSV data is never stored.
 │   ├── layout.tsx
 │   └── globals.css
 ├── lib/supabase/           ← Supabase client helpers (browser + server)
+├── public/                 ← Static assets (favicon)
 ├── middleware.ts           ← Protects every route with login + email-domain check
 ├── supabase/migrations/
-│   └── 0001_init.sql       ← The SQL to run in your Supabase project (one time)
+│   ├── 0001_init.sql            ← Initial tables (run once)
+│   └── 0002_watchlist_triggers.sql  ← Watchlist correctness triggers (run once)
 ├── package.json            ← Next.js dependencies
 ├── requirements.txt        ← Python dependencies for the serverless function
+├── next.config.mjs         ← Next.js build config
+├── tsconfig.json           ← TypeScript config
 ├── vercel.json             ← Function memory / timeout config
 └── .env.example            ← Template for environment variables
 ```
@@ -47,14 +51,18 @@ You'll do this once. The order matters.
    and choose the region closest to your team.
 4. Wait ~2 minutes for it to provision.
 
-### 2. Run the SQL migration
+### 2. Run the SQL migrations
 
 1. In your new Supabase project, click **SQL Editor** in the left sidebar.
 2. Click **New query**.
-3. Open the file `supabase/migrations/0001_init.sql` from this repo, copy the
-   entire contents, paste into the SQL editor, and click **Run**.
-4. You should see "Success. No rows returned." If you see errors, copy them and
-   share them — the script is idempotent so you can re-run safely.
+3. Open `supabase/migrations/0001_init.sql` from this repo, copy the entire
+   contents, paste into the SQL editor, and click **Run**. You should see
+   "Success. No rows returned."
+4. Repeat for `supabase/migrations/0002_watchlist_triggers.sql` (creates
+   triggers that handle atomic `flag_count` increments and keep `updated_at`
+   in sync — fixes a race condition that would otherwise undercount
+   concurrent watchlist updates).
+5. Both scripts are idempotent so you can re-run safely if anything fails.
 
 ### 3. Configure Supabase Auth (Google OAuth via Cubo Workspace)
 
