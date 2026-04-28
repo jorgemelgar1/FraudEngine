@@ -15,6 +15,8 @@ import os
 import sys
 import tempfile
 import traceback
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler
 
 # Make the project-root analyze.py importable.
@@ -37,32 +39,57 @@ ALLOWED_EMAIL_DOMAIN  = os.environ.get('ALLOWED_EMAIL_DOMAIN', 'cubopago.com').l
 def verify_user(auth_header):
     """Return (user_id, email) on success; raise ValueError otherwise.
 
-    Delegates JWT validation to Supabase's /auth/v1/user endpoint via the
-    supabase-py client. Supabase always knows its own signing keys, so this
-    works regardless of the project's signing algorithm (HS256 on legacy
-    projects, ES256/RS256 on newer ones, anything Supabase rolls out next).
+    Calls Supabase's /auth/v1/user endpoint directly via urllib so the raw
+    error response is visible if validation fails — easier to debug than
+    supabase-py's wrapped exceptions.
     """
     if not auth_header or not auth_header.startswith('Bearer '):
         raise ValueError('Missing bearer token')
     token = auth_header[len('Bearer '):]
 
-    # Use the anon key (not service role) for auth validation. The anon key
-    # is the same one the frontend uses successfully, so we know it's correct;
-    # auth validation only needs anon-level access regardless.
+    # Surface env-var problems clearly instead of letting them turn into
+    # cryptic "Invalid API key" responses from Supabase.
+    if not SUPABASE_URL:
+        raise ValueError('Server config: NEXT_PUBLIC_SUPABASE_URL not set in Vercel')
+    if not SUPABASE_ANON_KEY:
+        raise ValueError(
+            'Server config: NEXT_PUBLIC_SUPABASE_ANON_KEY not set in Vercel '
+            '(this is the same value the frontend uses)'
+        )
+
+    # Hint about the key shape so config typos surface in the error message.
+    # Only the first 6 chars — enough to distinguish "eyJh..." (legacy JWT
+    # format) from "sb_pu..." (new format) without leaking the secret.
+    key_hint = SUPABASE_ANON_KEY[:6] + '...'
+
+    req = urllib.request.Request(
+        f'{SUPABASE_URL.rstrip("/")}/auth/v1/user',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'apikey': SUPABASE_ANON_KEY,
+        },
+    )
     try:
-        sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-        user_response = sb.auth.get_user(token)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            user = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode('utf-8', errors='replace')[:300]
+        except Exception:
+            body = '(no body)'
+        raise ValueError(
+            f'Supabase rejected token (HTTP {e.code}, anon key prefix {key_hint}): {body}'
+        )
     except Exception as e:
-        raise ValueError(f'Invalid token: {e}')
+        raise ValueError(
+            f'Could not reach Supabase to validate token (anon key prefix {key_hint}): '
+            f'{type(e).__name__}: {e}'
+        )
 
-    user = getattr(user_response, 'user', None)
-    if user is None:
-        raise ValueError('Invalid token: no user returned')
-
-    email = ((user.email or '') if hasattr(user, 'email') else '').lower()
-    user_id = getattr(user, 'id', None)
+    email = (user.get('email') or '').lower()
+    user_id = user.get('id')
     if not email or not user_id:
-        raise ValueError('Token missing email or user id')
+        raise ValueError('Token missing email or user id in /auth/v1/user response')
     # Exact-suffix check: reject crafted addresses like "evil@x.com@cubopago.com".
     parts = email.split('@')
     if len(parts) != 2 or parts[1] != ALLOWED_EMAIL_DOMAIN:
