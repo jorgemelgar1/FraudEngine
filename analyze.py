@@ -94,6 +94,54 @@ CONTACTLESS_PLACEHOLDERS = {
 
 
 # ---------------------------------------------------------------------------
+# Currency
+# ---------------------------------------------------------------------------
+#
+# Cubo CSVs are country-specific (one country per export), so the currency
+# is a single value per file derived from the `country_name` column. There's
+# no dedicated currency column in the export schema today; if one is added
+# later, prefer that and treat this table as a fallback.
+#
+# Numeric format is the same en-US convention for every supported currency
+# (comma thousands, dot decimals), so only the prefix changes between USD
+# and GTQ. New countries are easy to add — keep the keys lowercased and
+# accent-folded.
+
+DEFAULT_CURRENCY = 'USD'
+
+COUNTRY_TO_CURRENCY = {
+    'panama':       'USD',
+    'el salvador':  'USD',
+    'guatemala':    'GTQ',
+}
+
+
+def _normalize_country(name: str) -> str:
+    """Lower-case + accent-fold a country name for table lookup."""
+    if not name:
+        return ''
+    name = name.lower().strip()
+    for a, b in (('á', 'a'), ('é', 'e'), ('í', 'i'), ('ó', 'o'), ('ú', 'u')):
+        name = name.replace(a, b)
+    return name
+
+
+def detect_currency(df_u, default: str = DEFAULT_CURRENCY) -> str:
+    """Return the ISO currency code for this CSV. Uses the most-common
+    non-null country_name value. Unknown country falls back to `default`."""
+    if 'country_name' not in df_u.columns:
+        return default
+    countries = df_u['country_name'].dropna().astype(str).map(_normalize_country)
+    countries = countries[countries != '']
+    if countries.empty:
+        return default
+    top = countries.mode()
+    if len(top) == 0:
+        return default
+    return COUNTRY_TO_CURRENCY.get(top.iloc[0], default)
+
+
+# ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 
@@ -892,6 +940,11 @@ def analyze(csv_path, watchlist_path=None):
     date_end = df_u['transaction_created_at'].max()
     date_str = date_start.isoformat() if pd.notna(date_start) else datetime.now(timezone.utc).isoformat()
 
+    # Currency for this CSV. One value per file because CSVs are country-
+    # specific; threaded through findings and the summary so the frontend
+    # and the Spanish action text both render the right ISO code.
+    currency = detect_currency(df_u)
+
     # Test transactions
     suspicious_tests = identify_test_transactions(df_u)
 
@@ -1022,7 +1075,7 @@ def analyze(csv_path, watchlist_path=None):
             confidence = 'Critical'
             action_code = decide_action(fingerprints, switches_here, cross_here)
             description = build_description_es(mname, fingerprints, group, watchlist_merchants)
-            action_es = build_action_es(action_code, len(ticket_rows), exposure)
+            action_es = build_action_es(action_code, len(ticket_rows), exposure, currency)
             critical_findings.append({
                 'type': classify_finding_type(fingerprints),
                 'company_name': mname,
@@ -1035,6 +1088,7 @@ def analyze(csv_path, watchlist_path=None):
                 'recommended_action_es': action_es,
                 'action_code': action_code,
                 'estimated_chargeback_exposure': round(exposure, 2),
+                'currency': currency,
                 'total_transactions': n_total,
                 'rejected_count': n_rej,
                 'succeeded_count': n_succ,
@@ -1144,6 +1198,7 @@ def analyze(csv_path, watchlist_path=None):
         'total_duplicate_findings': len(duplicates),
         'total_watchlist_hits': len(watchlist_hits_merchants),
         'estimated_chargeback_exposure': round(sum(f.get('estimated_chargeback_exposure', 0) for f in critical_findings), 2),
+        'currency': currency,
         'total_high_risk_score_transactions': len(high_risk_score_transactions),
         'total_foreign_card_velocity_merchants': len(foreign_card_bursts),
     }
@@ -1224,14 +1279,17 @@ def build_description_es(mname, fingerprints, group, watchlist_merchants):
     return " ".join(pieces)
 
 
-def build_action_es(action_code, n_successful, exposure):
+def build_action_es(action_code, n_successful, exposure, currency=DEFAULT_CURRENCY):
     # `:,.2f` → US-style thousands separator + 2 decimals (e.g., 5,678.34).
     # Frontend uses the same convention via toLocaleString('en-US', ...),
     # so the per-merchant action text and the summary KPI match.
+    # Currency is the ISO code (USD, GTQ, ...). We render "USD 5,678.34"
+    # rather than "$5,678.34" because `$` is ambiguous across Latin American
+    # currencies (Mexico, Argentina, Chile all use $ for their local peso).
     if action_code == 'FREEZE_MERCHANT':
-        return f"Congelar cuenta del merchant y retener depósito. Revisar los {n_successful} cargos exitosos (USD ${exposure:,.2f}) para exposición a chargebacks."
+        return f"Congelar cuenta del merchant y retener depósito. Revisar los {n_successful} cargos exitosos ({currency} {exposure:,.2f}) para exposición a chargebacks."
     elif action_code == 'REVIEW_CHARGE':
-        return f"Revisar el cargo exitoso de USD ${exposure:,.2f} — riesgo alto de chargeback por channel-switch retry."
+        return f"Revisar el cargo exitoso de {currency} {exposure:,.2f} — riesgo alto de chargeback por channel-switch retry."
     elif action_code == 'INVESTIGATE_RING':
         return "Investigar a los merchants involucrados como una entidad única. Revisar si comparten dueño/RUC/email de onboarding."
     else:
@@ -1300,7 +1358,7 @@ def main():
     print(f"Watchlist hits: {s['total_watchlist_hits']}")
     print(f"High-risk-score transactions (>{HIGH_RISK_SCORE_THRESHOLD}): {s['total_high_risk_score_transactions']}")
     print(f"Merchants with foreign-card velocity: {s['total_foreign_card_velocity_merchants']}")
-    print(f"Chargeback exposure estimate: ${s['estimated_chargeback_exposure']:,.2f}")
+    print(f"Chargeback exposure estimate: {s.get('currency', DEFAULT_CURRENCY)} {s['estimated_chargeback_exposure']:,.2f}")
     print(f"Output written to: {output_path}")
 
 

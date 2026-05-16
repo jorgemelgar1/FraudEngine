@@ -55,6 +55,9 @@ type Findings = {
     total_duplicate_findings: number;
     total_watchlist_hits: number;
     estimated_chargeback_exposure: number;
+    currency?: string;  // ISO 4217 (USD, GTQ, ...). Optional for backward
+                        // compatibility with reports generated before the
+                        // multi-currency change shipped.
     total_high_risk_score_transactions: number;
     total_foreign_card_velocity_merchants: number;
   };
@@ -66,11 +69,19 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4 MB — keep under Vercel's 4.5 MB r
 
 // Force en-US formatting on numeric / monetary KPIs. Without the locale arg,
 // toLocaleString() reads the browser locale, which would render "1.234,56"
-// for users with a Spanish-locale browser even though the source data is
-// USD. Internal reports go to a US-style audit pipeline, so we pin en-US.
+// for users with a Spanish-locale browser even though the source data uses
+// US-style separators across all currencies we support today (USD, GTQ).
+// Internal reports go to a US-style audit pipeline, so we pin en-US.
 const fmtNumber = (n: number) => n.toLocaleString('en-US');
-const fmtUSD = (n: number) =>
-  n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+const fmtCurrency = (n: number, code: string = 'USD') => {
+  try {
+    return n.toLocaleString('en-US', { style: 'currency', currency: code });
+  } catch {
+    // Unknown ISO code (e.g., a future country we haven't mapped server-side
+    // yet). Don't crash the page — fall back to plain number + the raw code.
+    return `${code} ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+};
 
 export default function HomePage() {
   const router = useRouter();
@@ -307,8 +318,11 @@ export default function HomePage() {
                 <Kpi label="Monitor" value={fmtNumber(results.summary.total_monitor_findings)} />
                 <Kpi label="Watchlist hits" value={fmtNumber(results.summary.total_watchlist_hits)} />
                 <Kpi
-                  label="CB exposure"
-                  value={fmtUSD(results.summary.estimated_chargeback_exposure)}
+                  label={`CB exposure (${results.summary.currency || 'USD'})`}
+                  value={fmtCurrency(
+                    results.summary.estimated_chargeback_exposure,
+                    results.summary.currency,
+                  )}
                 />
                 <Kpi label="High-risk tx" value={fmtNumber(results.summary.total_high_risk_score_transactions)} />
               </div>

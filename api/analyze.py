@@ -242,18 +242,23 @@ def sync_watchlist_to_supabase(wl: dict, run_id: str):
 
 def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict) -> str:
     summary = findings.get('summary', {})
+    # `chargeback_exposure_usd` is a legacy column name from when the engine
+    # only handled Panama CSVs. It now holds whatever currency the CSV is
+    # denominated in; the currency code is stored alongside it in
+    # `chargeback_exposure_currency` (added in migration 0003).
     payload = {
-        'run_by_email':            email,
-        'run_by_user_id':          user_id,
-        'csv_filename':            csv_filename,
-        'csv_date_start':          (summary.get('date_range') or {}).get('start'),
-        'csv_date_end':            (summary.get('date_range') or {}).get('end'),
-        'total_rows':              summary.get('total_rows'),
-        'unique_transactions':     summary.get('unique_transactions'),
-        'critical_findings_count': summary.get('total_critical_findings'),
-        'monitor_findings_count':  summary.get('total_monitor_findings'),
-        'chargeback_exposure_usd': summary.get('estimated_chargeback_exposure'),
-        'summary':                 summary,
+        'run_by_email':                  email,
+        'run_by_user_id':                user_id,
+        'csv_filename':                  csv_filename,
+        'csv_date_start':                (summary.get('date_range') or {}).get('start'),
+        'csv_date_end':                  (summary.get('date_range') or {}).get('end'),
+        'total_rows':                    summary.get('total_rows'),
+        'unique_transactions':           summary.get('unique_transactions'),
+        'critical_findings_count':       summary.get('total_critical_findings'),
+        'monitor_findings_count':        summary.get('total_monitor_findings'),
+        'chargeback_exposure_usd':       summary.get('estimated_chargeback_exposure'),
+        'chargeback_exposure_currency':  summary.get('currency', 'USD'),
+        'summary':                       summary,
     }
     res = sb_rest('POST', 'analysis_runs',
                   body=payload, prefer='return=representation')
@@ -263,20 +268,25 @@ def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict
 
 
 def insert_findings_history(run_id: str, findings: dict):
+    summary_currency = (findings.get('summary') or {}).get('currency', 'USD')
     rows = []
     for f in findings.get('critical_findings', []) + findings.get('monitor_findings', []):
         rows.append({
-            'run_id':                  run_id,
-            'company_name':            f.get('company_name'),
-            'company_id':              f.get('company_id'),
-            'finding_type':            f.get('type'),
-            'confidence':              f.get('confidence'),
-            'risk_score':              f.get('risk_score'),
-            'fingerprints':            f.get('fingerprints', []),
-            'action_code':             f.get('action_code'),
-            'chargeback_exposure_usd': f.get('estimated_chargeback_exposure'),
-            'description_es':          f.get('description_es'),
-            'payload':                 f,
+            'run_id':                       run_id,
+            'company_name':                 f.get('company_name'),
+            'company_id':                   f.get('company_id'),
+            'finding_type':                 f.get('type'),
+            'confidence':                   f.get('confidence'),
+            'risk_score':                   f.get('risk_score'),
+            'fingerprints':                 f.get('fingerprints', []),
+            'action_code':                  f.get('action_code'),
+            'chargeback_exposure_usd':      f.get('estimated_chargeback_exposure'),
+            # Per-finding currency falls back to the run's currency. Monitor
+            # findings don't carry an exposure, so the currency is informational
+            # but kept for query-time joins.
+            'chargeback_exposure_currency': f.get('currency') or summary_currency,
+            'description_es':               f.get('description_es'),
+            'payload':                      f,
         })
     if rows:
         sb_rest('POST', 'findings_history', body=rows)

@@ -22,7 +22,8 @@ report. Watchlist persists across runs in Supabase. CSV data is never stored.
 ├── middleware.ts           ← Protects every route with login + email-domain check
 ├── supabase/migrations/
 │   ├── 0001_init.sql            ← Initial tables (run once)
-│   └── 0002_watchlist_triggers.sql  ← Watchlist correctness triggers (run once)
+│   ├── 0002_watchlist_triggers.sql  ← Watchlist correctness triggers (run once)
+│   └── 0003_currency.sql        ← Multi-currency column on audit rows (run once)
 ├── package.json            ← Next.js dependencies
 ├── requirements.txt        ← Python dependencies for the serverless function
 ├── next.config.mjs         ← Next.js build config
@@ -62,7 +63,13 @@ You'll do this once. The order matters.
    triggers that handle atomic `flag_count` increments and keep `updated_at`
    in sync — fixes a race condition that would otherwise undercount
    concurrent watchlist updates).
-5. Both scripts are idempotent so you can re-run safely if anything fails.
+5. Repeat for `supabase/migrations/0003_currency.sql` (adds the
+   `chargeback_exposure_currency` column to `analysis_runs` and
+   `findings_history` so each row records whether the exposure number
+   is USD or GTQ). **Run this before deploying the multi-currency code
+   change**, otherwise `/api/analyze` will fail with a "column does not
+   exist" error from PostgREST.
+6. All scripts are idempotent so you can re-run safely if anything fails.
 
 ### 3. Configure Supabase Auth (Google OAuth via Cubo Workspace)
 
