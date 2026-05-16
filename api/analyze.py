@@ -239,7 +239,22 @@ def insert_findings_history(run_id: str, findings: dict):
             'payload':                      f,
         })
     if rows:
-        sb_rest('POST', 'findings_history', body=rows)
+        inserted = sb_rest(
+            'POST', 'findings_history',
+            body=rows, prefer='return=representation',
+        )
+        # PostgREST returns inserted rows in the same order we sent them
+        # (critical first, then monitor — see the loop above). Attach each
+        # row's id back onto the in-memory finding object so the report
+        # screen can call /api/findings without re-fetching.
+        if inserted and len(inserted) == len(rows):
+            critical = findings.get('critical_findings', [])
+            monitor  = findings.get('monitor_findings', [])
+            for i, row in enumerate(inserted):
+                if i < len(critical):
+                    critical[i]['finding_id'] = row['id']
+                else:
+                    monitor[i - len(critical)]['finding_id'] = row['id']
 
 
 # ─────────────────────────────────────────────────────────────────────────────

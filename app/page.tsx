@@ -31,6 +31,9 @@ type CriticalFinding = {
   total_transactions: number;
   rejected_count: number;
   succeeded_count: number;
+  // Attached server-side after the findings row is inserted, so the report
+  // screen can call /api/findings without re-fetching.
+  finding_id?: string;
 };
 
 type MonitorFinding = {
@@ -95,6 +98,12 @@ export default function HomePage() {
   // Count of Critical findings awaiting team review. Fetched on mount and
   // again after each analysis so the banner always reflects current state.
   const [pendingCount, setPendingCount] = useState<number | null>(null);
+  // Per-finding review state for the current report. Only populated as the
+  // user clicks Aceptar/Descartar from this screen; rows that the user
+  // leaves alone stay pending in the DB and remain available in /pendientes.
+  const [reviewedById, setReviewedById] = useState<Record<string, 'accepted' | 'rejected'>>({});
+  // Set of finding ids that have an in-flight review call.
+  const [reviewingIds, setReviewingIds] = useState<Set<string>>(new Set());
 
   async function refreshPendingCount() {
     try {
@@ -114,10 +123,70 @@ export default function HomePage() {
 
   useEffect(() => { refreshPendingCount(); }, []);
 
+  // Bulk-safe Aceptar/Descartar from the report screen. Skips any ids that
+  // were already reviewed in this session (idempotent for double-clicks).
+  async function reviewFindings(action: 'accept' | 'reject', findingIds: string[]) {
+    const ids = findingIds.filter(id => id && !reviewedById[id]);
+    if (ids.length === 0) return;
+
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      router.push('/login');
+      return;
+    }
+    setReviewingIds(prev => {
+      const next = new Set(prev);
+      ids.forEach(id => next.add(id));
+      return next;
+    });
+    try {
+      const res = await fetch('/api/findings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ action, finding_ids: ids }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(json.error || `El servidor respondió con ${res.status}`);
+        return;
+      }
+      // Mark per-id outcome based on the RPC's per-row result so a partial
+      // failure leaves the failed rows still actionable.
+      const settled: Record<string, 'accepted' | 'rejected'> = {};
+      const failed: string[] = [];
+      for (const r of (json.results || []) as Array<{ id: string; ok: boolean; error?: string }>) {
+        if (r.ok) {
+          settled[r.id] = action === 'accept' ? 'accepted' : 'rejected';
+        } else {
+          failed.push(r.error || r.id);
+        }
+      }
+      setReviewedById(prev => ({ ...prev, ...settled }));
+      if (failed.length > 0) {
+        setError(`Algunos hallazgos no se pudieron procesar: ${failed[0]}`);
+      }
+      refreshPendingCount();
+    } catch (e: any) {
+      setError(e?.message || 'Acción fallida');
+    } finally {
+      setReviewingIds(prev => {
+        const next = new Set(prev);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
+    }
+  }
+
   async function handleFile(file: File) {
     if (uploading) return;  // guard against double-click / double-drop racing
     setError('');
     setResults(null);
+    setReviewedById({});
+    setReviewingIds(new Set());
 
     if (!file.name.toLowerCase().endsWith('.csv')) {
       setError('Por favor sube un archivo .csv.');
@@ -381,15 +450,63 @@ export default function HomePage() {
 
             {results.critical_findings.length > 0 && (
               <div className="card">
-                <h3 style={{ marginTop: 0 }}>Hallazgos Críticos</h3>
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'flex-start',
+                  flexWrap: 'wrap',
+                  gap: '0.5rem',
+                }}>
+                  <h3 style={{ marginTop: 0 }}>Hallazgos Críticos</h3>
+                  {(() => {
+                    // Bulk controls — only enabled when at least one finding
+                    // in the report is still unreviewed and has a DB id.
+                    const actionable = results.critical_findings
+                      .map(f => f.finding_id)
+                      .filter((id): id is string => !!id && !reviewedById[id]);
+                    const anyInflight = actionable.some(id => reviewingIds.has(id));
+                    if (actionable.length === 0) return null;
+                    return (
+                      <div style={{ display: 'flex', gap: '0.4rem' }}>
+                        <button
+                          className="signout"
+                          disabled={anyInflight}
+                          onClick={() => reviewFindings('accept', actionable)}
+                        >
+                          Aceptar todos
+                        </button>
+                        <button
+                          className="signout"
+                          disabled={anyInflight}
+                          onClick={() => reviewFindings('reject', actionable)}
+                        >
+                          Descartar todos
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
                 <p className="muted" style={{ marginTop: 0, fontSize: '0.9rem' }}>
-                  Estos hallazgos quedaron en{' '}
-                  <Link href="/pendientes">Revisiones pendientes</Link>. La Watchlist
-                  no se actualiza hasta que un miembro del equipo los acepte.
+                  La Watchlist no se actualiza hasta que un miembro del equipo
+                  acepte cada hallazgo. Puedes revisarlos aquí o más tarde
+                  desde <Link href="/pendientes">Revisiones pendientes</Link>.
                 </p>
-                {results.critical_findings.map((f, i) => (
-                  <FindingCard key={i} finding={f} tier="critical" />
-                ))}
+                {results.critical_findings.map((f, i) => {
+                  const id = f.finding_id;
+                  const reviewedAs = id ? reviewedById[id] : undefined;
+                  const inflight = id ? reviewingIds.has(id) : false;
+                  return (
+                    <FindingCard
+                      key={id || i}
+                      finding={f}
+                      tier="critical"
+                      reviewState={reviewedAs}
+                      inflight={inflight}
+                      onAccept={id && !reviewedAs ? () => reviewFindings('accept', [id]) : undefined}
+                      onReject={id && !reviewedAs ? () => reviewFindings('reject', [id]) : undefined}
+                    />
+                  );
+                })}
               </div>
             )}
 
@@ -428,20 +545,81 @@ function Kpi({ label, value }: { label: string; value: string | number }) {
 function FindingCard({
   finding,
   tier,
+  reviewState,
+  inflight,
+  onAccept,
+  onReject,
 }: {
   finding: CriticalFinding | MonitorFinding;
   tier: 'critical' | 'monitor';
+  reviewState?: 'accepted' | 'rejected';
+  inflight?: boolean;
+  onAccept?: () => void;
+  onReject?: () => void;
 }) {
   // Only critical findings carry a recommended_action_es. Use a type guard
   // so TypeScript narrows the optional access to the right branch.
   const action =
     'recommended_action_es' in finding ? finding.recommended_action_es : undefined;
 
+  // Visual treatment for the post-review badge — green for Aceptado, orange
+  // for Descartado, matching the chip style used on /historial.
+  const badge = reviewState === 'accepted'
+    ? { text: 'Aceptado ✓', bg: 'rgba(0, 201, 167, 0.15)', fg: 'var(--cubo-teal)' }
+    : reviewState === 'rejected'
+      ? { text: 'Descartado',   bg: 'rgba(255, 107, 53, 0.15)', fg: 'var(--cubo-orange)' }
+      : null;
+
   return (
-    <div className={`finding ${tier === 'monitor' ? 'monitor' : ''}`}>
-      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <strong>{finding.company_name}</strong>
-        <span>Riesgo: {finding.risk_score}</span>
+    <div
+      className={`finding ${tier === 'monitor' ? 'monitor' : ''}`}
+      style={reviewState ? { opacity: 0.7 } : undefined}
+    >
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        flexWrap: 'wrap',
+        gap: '0.5rem',
+      }}>
+        <div style={{ flex: '1 1 auto' }}>
+          <strong>{finding.company_name}</strong>
+          <span className="muted" style={{ marginLeft: '0.75rem' }}>
+            Riesgo: {finding.risk_score}
+          </span>
+        </div>
+        {/* Review controls only render for Critical (onAccept/onReject are
+            only passed in for that tier). Monitor cards show no buttons. */}
+        {(onAccept || onReject || badge) && (
+          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+            {badge && (
+              <span
+                className="tag"
+                style={{ background: badge.bg, color: badge.fg }}
+              >
+                {badge.text}
+              </span>
+            )}
+            {!badge && onAccept && (
+              <button
+                className="signout"
+                disabled={inflight}
+                onClick={onAccept}
+              >
+                Aceptar
+              </button>
+            )}
+            {!badge && onReject && (
+              <button
+                className="signout"
+                disabled={inflight}
+                onClick={onReject}
+              >
+                Descartar
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>{finding.description_es}</p>
       <div>
