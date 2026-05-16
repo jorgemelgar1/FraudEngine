@@ -988,12 +988,18 @@ def analyze(csv_path, watchlist_path=None):
 
         # Build finding object
         ticket_rows = group[succeeded_mask]
-        exposure = 0
-        if switches_here:
-            exposure += sum(s['amount'] for s in switches_here)
-        if ladder_hit or velocity_hit:
-            # Successful charges during a fraud burst are chargeback risk
-            exposure += float(ticket_rows['amount'].sum()) if len(ticket_rows) > 0 else 0
+        # Chargeback-exposure rule (post-2026-05): every succeeded charge at a
+        # merchant that lands in the Critical tier is treated as at-risk for
+        # chargeback, regardless of which fingerprint fired. The previous rule
+        # only counted exposure when ladder/velocity/switch were among the
+        # fingerprints, which silently zeroed out merchants whose dominant
+        # pattern was watchlist hit, BIN diversity, foreign-card velocity,
+        # MinFraud block, name rotation, or cross-merchant reuse. The risk-
+        # score gate is implicit: exposure is only written to the output
+        # for risk_score >= 70 (the Critical branch below); we compute it
+        # unconditionally because the cost is trivial and it keeps the value
+        # available for any future reuse.
+        exposure = float(ticket_rows['amount'].sum()) if len(ticket_rows) > 0 else 0.0
 
         # Evidence: first 5 rows. df_u is already globally time-sorted, so no
         # need to re-sort the per-merchant slice.
