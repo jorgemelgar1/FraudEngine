@@ -64,6 +64,14 @@ type Findings = {
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4 MB — keep under Vercel's 4.5 MB request-body limit.
 
+// Force en-US formatting on numeric / monetary KPIs. Without the locale arg,
+// toLocaleString() reads the browser locale, which would render "1.234,56"
+// for users with a Spanish-locale browser even though the source data is
+// USD. Internal reports go to a US-style audit pipeline, so we pin en-US.
+const fmtNumber = (n: number) => n.toLocaleString('en-US');
+const fmtUSD = (n: number) =>
+  n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
 export default function HomePage() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -294,15 +302,15 @@ export default function HomePage() {
               </div>
 
               <div className="kpi-grid" style={{ marginTop: '1rem' }}>
-                <Kpi label="Transactions" value={results.summary.unique_transactions.toLocaleString()} />
-                <Kpi label="Critical" value={results.summary.total_critical_findings} />
-                <Kpi label="Monitor" value={results.summary.total_monitor_findings} />
-                <Kpi label="Watchlist hits" value={results.summary.total_watchlist_hits} />
+                <Kpi label="Transactions" value={fmtNumber(results.summary.unique_transactions)} />
+                <Kpi label="Critical" value={fmtNumber(results.summary.total_critical_findings)} />
+                <Kpi label="Monitor" value={fmtNumber(results.summary.total_monitor_findings)} />
+                <Kpi label="Watchlist hits" value={fmtNumber(results.summary.total_watchlist_hits)} />
                 <Kpi
                   label="CB exposure"
-                  value={`$${results.summary.estimated_chargeback_exposure.toLocaleString()}`}
+                  value={fmtUSD(results.summary.estimated_chargeback_exposure)}
                 />
-                <Kpi label="High-risk tx" value={results.summary.total_high_risk_score_transactions} />
+                <Kpi label="High-risk tx" value={fmtNumber(results.summary.total_high_risk_score_transactions)} />
               </div>
             </div>
 

@@ -1225,10 +1225,13 @@ def build_description_es(mname, fingerprints, group, watchlist_merchants):
 
 
 def build_action_es(action_code, n_successful, exposure):
+    # `:,.2f` → US-style thousands separator + 2 decimals (e.g., 5,678.34).
+    # Frontend uses the same convention via toLocaleString('en-US', ...),
+    # so the per-merchant action text and the summary KPI match.
     if action_code == 'FREEZE_MERCHANT':
-        return f"Congelar cuenta del merchant y retener depósito. Revisar los {n_successful} cargos exitosos (USD ${exposure:.2f}) para exposición a chargebacks."
+        return f"Congelar cuenta del merchant y retener depósito. Revisar los {n_successful} cargos exitosos (USD ${exposure:,.2f}) para exposición a chargebacks."
     elif action_code == 'REVIEW_CHARGE':
-        return f"Revisar el cargo exitoso de USD ${exposure:.2f} — riesgo alto de chargeback por channel-switch retry."
+        return f"Revisar el cargo exitoso de USD ${exposure:,.2f} — riesgo alto de chargeback por channel-switch retry."
     elif action_code == 'INVESTIGATE_RING':
         return "Investigar a los merchants involucrados como una entidad única. Revisar si comparten dueño/RUC/email de onboarding."
     else:
