@@ -314,8 +314,8 @@ export default function HomePage() {
 
               <div className="kpi-grid" style={{ marginTop: '1rem' }}>
                 <Kpi label="Transacciones" value={fmtNumber(results.summary.unique_transactions)} />
-                <Kpi label="Critical" value={fmtNumber(results.summary.total_critical_findings)} />
-                <Kpi label="Monitor" value={fmtNumber(results.summary.total_monitor_findings)} />
+                <Kpi label="Crítico" value={fmtNumber(results.summary.total_critical_findings)} />
+                <Kpi label="Monitorear" value={fmtNumber(results.summary.total_monitor_findings)} />
                 <Kpi label="Hits en Watchlist" value={fmtNumber(results.summary.total_watchlist_hits)} />
                 <Kpi
                   label={`Exposición CB (${results.summary.currency || 'USD'})`}
@@ -330,7 +330,7 @@ export default function HomePage() {
 
             {results.critical_findings.length > 0 && (
               <div className="card">
-                <h3 style={{ marginTop: 0 }}>Hallazgos Critical</h3>
+                <h3 style={{ marginTop: 0 }}>Hallazgos Críticos</h3>
                 {results.critical_findings.map((f, i) => (
                   <FindingCard key={i} finding={f} tier="critical" />
                 ))}
@@ -339,7 +339,7 @@ export default function HomePage() {
 
             {results.monitor_findings.length > 0 && (
               <div className="card">
-                <h3 style={{ marginTop: 0 }}>Hallazgos Monitor</h3>
+                <h3 style={{ marginTop: 0 }}>Hallazgos a Monitorear</h3>
                 {results.monitor_findings.map((f, i) => (
                   <FindingCard key={i} finding={f} tier="monitor" />
                 ))}
