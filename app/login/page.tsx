@@ -17,9 +17,9 @@ function LoginForm() {
   const search = useSearchParams();
   const initialError =
     search.get('error') === 'domain'
-      ? 'That email domain is not authorized. Please use your Cubo Pago Google account.'
+      ? 'Ese dominio de email no está autorizado. Por favor usa tu cuenta de Google de Cubo Pago.'
       : search.get('error') === 'callback'
-      ? 'Sign-in failed. Please try again.'
+      ? 'Falló el inicio de sesión. Por favor intenta de nuevo.'
       : '';
 
   const [signingIn, setSigningIn] = useState(false);
@@ -53,7 +53,7 @@ function LoginForm() {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src="https://buznvtdzsigrtruighzx.supabase.co/storage/v1/object/public/Assets/Cubo%20Holmes.png"
-            alt="Cubo Holmes mascot"
+            alt="Mascota Cubo Holmes"
             style={{ height: 120, width: 'auto' }}
           />
         </div>
@@ -68,7 +68,7 @@ function LoginForm() {
         </div>
         <h1 style={{ margin: '0 0 0.4rem 0', fontSize: '1.4rem' }}>Fraud Engine</h1>
         <p className="muted" style={{ marginBottom: '1.5rem' }}>
-          Sign in with your Cubo Pago Google account.
+          Inicia sesión con tu cuenta de Google de Cubo Pago.
         </p>
 
         {error && <div className="error">{error}</div>}
@@ -105,7 +105,7 @@ function LoginForm() {
               d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
             />
           </svg>
-          {signingIn ? 'Redirecting to Google…' : 'Sign in with Google'}
+          {signingIn ? 'Redirigiendo a Google…' : 'Iniciar sesión con Google'}
         </button>
       </div>
     </div>

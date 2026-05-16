@@ -31,7 +31,7 @@ const mulish = Mulish({
 
 export const metadata: Metadata = {
   title: 'Cubo Fraud Engine',
-  description: 'Internal fraud analysis tool for Cubo Pago',
+  description: 'Herramienta interna de análisis de fraude para Cubo Pago',
   robots: { index: false, follow: false },
   icons: {
     icon: '/cubo-iso.png',
@@ -41,7 +41,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${sora.variable} ${inter.variable} ${mulish.variable}`}>
+    <html lang="es" className={`${sora.variable} ${inter.variable} ${mulish.variable}`}>
       <body>{children}</body>
     </html>
   );
