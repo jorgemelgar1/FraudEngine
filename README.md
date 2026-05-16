@@ -23,7 +23,8 @@ report. Watchlist persists across runs in Supabase. CSV data is never stored.
 ├── supabase/migrations/
 │   ├── 0001_init.sql            ← Initial tables (run once)
 │   ├── 0002_watchlist_triggers.sql  ← Watchlist correctness triggers (run once)
-│   └── 0003_currency.sql        ← Multi-currency column on audit rows (run once)
+│   ├── 0003_currency.sql        ← Multi-currency column on audit rows (run once)
+│   └── 0004_findings_review.sql ← Human-in-the-loop watchlist review (run once)
 ├── package.json            ← Next.js dependencies
 ├── requirements.txt        ← Python dependencies for the serverless function
 ├── next.config.mjs         ← Next.js build config
@@ -69,7 +70,14 @@ You'll do this once. The order matters.
    is USD or GTQ). **Run this before deploying the multi-currency code
    change**, otherwise `/api/analyze` will fail with a "column does not
    exist" error from PostgREST.
-6. All scripts are idempotent so you can re-run safely if anything fails.
+6. Repeat for `supabase/migrations/0004_findings_review.sql` (adds
+   review columns to `findings_history`, updates the watchlist triggers
+   to honor a session guard, and creates `accept` / `reject` / `undo`
+   RPC functions used by `/api/findings`). **Run this before deploying
+   the review-flow change**, otherwise new Critical findings will land
+   without a `review_status` value and `/api/findings` writes will
+   fail.
+7. All scripts are idempotent so you can re-run safely if anything fails.
 
 ### 3. Configure Supabase Auth (Google OAuth via Cubo Workspace)
 

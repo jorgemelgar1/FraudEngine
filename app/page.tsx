@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useRef, DragEvent, KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, DragEvent, KeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 
 type EvidenceRow = {
@@ -91,6 +92,27 @@ export default function HomePage() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [results, setResults] = useState<Findings | null>(null);
+  // Count of Critical findings awaiting team review. Fetched on mount and
+  // again after each analysis so the banner always reflects current state.
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+
+  async function refreshPendingCount() {
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const res = await fetch('/api/findings?status=pending', {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) return;
+      const json = await res.json();
+      setPendingCount((json.findings || []).length);
+    } catch {
+      // Best-effort — banner just stays hidden on failure.
+    }
+  }
+
+  useEffect(() => { refreshPendingCount(); }, []);
 
   async function handleFile(file: File) {
     if (uploading) return;  // guard against double-click / double-drop racing
@@ -157,6 +179,8 @@ export default function HomePage() {
         return;
       }
       setResults(json);
+      // Findings are now pending review, so the banner count went up.
+      refreshPendingCount();
     } catch (e: any) {
       setError(e?.message || 'Falló la carga');
     } finally {
@@ -203,17 +227,44 @@ export default function HomePage() {
           />
           <span className="product">Fraud Engine</span>
         </div>
-        <button
-          className="signout"
-          onClick={signOut}
-          disabled={uploading}
-          aria-label={uploading ? 'Cerrar sesión (deshabilitado durante la carga)' : 'Cerrar sesión'}
-        >
-          Cerrar sesión
-        </button>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <Link href="/pendientes" className="signout">
+            Pendientes{pendingCount && pendingCount > 0 ? ` (${pendingCount})` : ''}
+          </Link>
+          <Link href="/historial" className="signout">Historial</Link>
+          <button
+            className="signout"
+            onClick={signOut}
+            disabled={uploading}
+            aria-label={uploading ? 'Cerrar sesión (deshabilitado durante la carga)' : 'Cerrar sesión'}
+          >
+            Cerrar sesión
+          </button>
+        </div>
       </header>
 
       <div className="container">
+        {!results && pendingCount !== null && pendingCount > 0 && (
+          <Link
+            href="/pendientes"
+            className="card"
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              textDecoration: 'none',
+              color: 'var(--text)',
+              borderColor: 'var(--cubo-orange)',
+              borderLeft: '4px solid var(--cubo-orange)',
+            }}
+          >
+            <span>
+              <strong>{pendingCount}</strong>{' '}
+              hallazgo{pendingCount === 1 ? '' : 's'} Critical pendiente{pendingCount === 1 ? '' : 's'} de revisión.
+            </span>
+            <span className="muted">Revisar →</span>
+          </Link>
+        )}
         {!results && (
           <div className="card">
             <div
@@ -331,6 +382,11 @@ export default function HomePage() {
             {results.critical_findings.length > 0 && (
               <div className="card">
                 <h3 style={{ marginTop: 0 }}>Hallazgos Críticos</h3>
+                <p className="muted" style={{ marginTop: 0, fontSize: '0.9rem' }}>
+                  Estos hallazgos quedaron en{' '}
+                  <Link href="/pendientes">Revisiones pendientes</Link>. La Watchlist
+                  no se actualiza hasta que un miembro del equipo los acepte.
+                </p>
                 {results.critical_findings.map((f, i) => (
                   <FindingCard key={i} finding={f} tier="critical" />
                 ))}

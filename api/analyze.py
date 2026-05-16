@@ -184,62 +184,6 @@ def load_watchlist_from_supabase() -> dict:
     return wl
 
 
-def sync_watchlist_to_supabase(wl: dict, run_id: str):
-    """Upsert merchants + cards. Permanent: never deletes."""
-    if wl.get('merchants'):
-        rows = [{
-            'company_name':    name,
-            'company_id':      entry.get('company_id') or None,
-            'first_flagged':   entry.get('first_flagged'),
-            'last_flagged':    entry.get('last_flagged'),
-            'flag_count':      int(entry.get('flag_count', 1)),
-            'last_risk_score': int(entry.get('last_risk_score', 0) or 0),
-            'last_run_id':     run_id,
-        } for name, entry in wl['merchants'].items()]
-        sb_rest('POST', 'watchlist_merchants',
-                body=rows, prefer='resolution=merge-duplicates')
-
-    if wl.get('cards'):
-        # Card-key contract: analyze.py builds keys as f"{bin}-{last4}" where
-        # both parts are zero-padded digit strings (bin = 6 digits, last4 = 4).
-        # The Supabase `card_key` column is a generated `bin || '-' || last4`,
-        # and `bin` / `last4` are `text not null`. If the analyze-side format
-        # ever drifts (e.g., to floats like "411111.0-1234.0"), the round-trip
-        # lookup breaks silently — fraud detectors lose the "known offender"
-        # signal but nothing errors. We validate the shape here and raise so
-        # the bad write is rejected at the boundary instead of corrupting
-        # the watchlist.
-        rows = []
-        skipped = []
-        for ck, entry in wl['cards'].items():
-            try:
-                bin_, last4 = ck.split('-', 1)
-            except ValueError:
-                skipped.append(ck)
-                continue
-            if not (bin_.isdigit() and last4.isdigit()):
-                skipped.append(ck)
-                continue
-            rows.append({
-                'bin':           bin_,
-                'last4':         last4,
-                'first_flagged': entry.get('first_flagged'),
-                'last_flagged':  entry.get('last_flagged'),
-                'flag_count':    int(entry.get('flag_count', 1)),
-                'last_run_id':   run_id,
-            })
-        if skipped:
-            raise ConfigError(
-                f'Watchlist sync rejected {len(skipped)} malformed card_key '
-                f'value(s) (expected "<digits>-<digits>"). First offender: '
-                f'{skipped[0]!r}. This indicates an evidence-row format '
-                f'change in analyze.py — fix the producer, not this check.'
-            )
-        if rows:
-            sb_rest('POST', 'watchlist_cards',
-                    body=rows, prefer='resolution=merge-duplicates')
-
-
 def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict) -> str:
     summary = findings.get('summary', {})
     # `chargeback_exposure_usd` is a legacy column name from when the engine
@@ -271,12 +215,17 @@ def insert_findings_history(run_id: str, findings: dict):
     summary_currency = (findings.get('summary') or {}).get('currency', 'USD')
     rows = []
     for f in findings.get('critical_findings', []) + findings.get('monitor_findings', []):
+        confidence = f.get('confidence')
+        # Critical findings need human review before they update the watchlist
+        # (migration 0004). Monitor findings never wrote to the watchlist, so
+        # they're marked not_applicable to keep them out of the pending queue.
+        review_status = 'pending' if confidence == 'Critical' else 'not_applicable'
         rows.append({
             'run_id':                       run_id,
             'company_name':                 f.get('company_name'),
             'company_id':                   f.get('company_id'),
             'finding_type':                 f.get('type'),
-            'confidence':                   f.get('confidence'),
+            'confidence':                   confidence,
             'risk_score':                   f.get('risk_score'),
             'fingerprints':                 f.get('fingerprints', []),
             'action_code':                  f.get('action_code'),
@@ -286,6 +235,7 @@ def insert_findings_history(run_id: str, findings: dict):
             # but kept for query-time joins.
             'chargeback_exposure_currency': f.get('currency') or summary_currency,
             'description_es':               f.get('description_es'),
+            'review_status':                review_status,
             'payload':                      f,
         })
     if rows:
@@ -433,11 +383,11 @@ class handler(BaseHTTPRequestHandler):
                         f'Contact the engineer with this reference.'
                     )
 
-                with open(wl_path) as f:
-                    updated_wl = json.load(f)
-
+            # As of migration 0004 the watchlist is no longer auto-updated
+            # from the analysis output. Findings land in findings_history
+            # as 'pending' (Critical) or 'not_applicable' (Monitor); a team
+            # member reviews and accepts each via /api/findings.
             run_id = insert_run_audit(user_id, email, filename, findings)
-            sync_watchlist_to_supabase(updated_wl, run_id)
             insert_findings_history(run_id, findings)
 
             findings['run_id'] = run_id
