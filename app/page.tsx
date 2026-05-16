@@ -97,24 +97,40 @@ export default function HomePage() {
     setUploading(true);
     try {
       const supabase = createClient();
-      // Refresh the session right before sending the JWT — guarantees a
-      // non-expired access token even if the page has been idle for hours.
-      // refreshSession() returns a fresh access_token if the refresh token
-      // is still valid; otherwise it errors and we send the user to /login.
-      const { data: { session }, error: refreshErr } = await supabase.auth.refreshSession();
-      if (refreshErr || !session) {
+
+      // Use the cached session first. The Supabase browser client auto-
+      // refreshes in the background while the tab is open, so the cached
+      // token is usually fresh. If the server still returns 401 (e.g. tab
+      // was backgrounded long enough to expire mid-flight), we refresh and
+      // retry exactly once before giving up — same end-user effect as the
+      // old eager-refresh, without the extra round-trip on every upload.
+      const form = new FormData();
+      form.append('file', file);
+
+      async function postWithToken(token: string) {
+        return fetch('/api/analyze', {
+          method: 'POST',
+          body: form,
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
         router.push('/login');
         return;
       }
 
-      const form = new FormData();
-      form.append('file', file);
-
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        body: form,
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
+      let res = await postWithToken(session.access_token);
+      if (res.status === 401) {
+        const { data: { session: fresh }, error: refreshErr } =
+          await supabase.auth.refreshSession();
+        if (refreshErr || !fresh) {
+          router.push('/login');
+          return;
+        }
+        res = await postWithToken(fresh.access_token);
+      }
 
       const json = await res.json();
       if (!res.ok) {

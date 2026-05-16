@@ -1,7 +1,6 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-
-const ALLOWED_DOMAIN = (process.env.ALLOWED_EMAIL_DOMAIN || 'cubopago.com').toLowerCase();
+import { ALLOWED_EMAIL_DOMAIN } from '@/lib/config';
 
 type CookieToSet = { name: string; value: string; options: CookieOptions };
 
@@ -42,7 +41,7 @@ export async function middleware(request: NextRequest) {
     const email = (user.email || '').toLowerCase();
     // Exact-suffix check: reject crafted addresses like "evil@x.com@cubopago.com".
     const parts = email.split('@');
-    if (parts.length !== 2 || parts[1] !== ALLOWED_DOMAIN) {
+    if (parts.length !== 2 || parts[1] !== ALLOWED_EMAIL_DOMAIN) {
       await supabase.auth.signOut();
       return NextResponse.redirect(new URL('/login?error=domain', request.url));
     }

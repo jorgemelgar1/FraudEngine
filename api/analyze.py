@@ -33,6 +33,11 @@ SUPABASE_ANON_KEY     = os.environ.get('NEXT_PUBLIC_SUPABASE_ANON_KEY', '')
 SUPABASE_SERVICE_KEY  = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 ALLOWED_EMAIL_DOMAIN  = os.environ.get('ALLOWED_EMAIL_DOMAIN', 'cubopago.com').lower()
 
+# Hard cap on accepted upload size. Vercel's request-body limit is ~4.5 MB on
+# Hobby; we mirror the client-side limit so a forged request can't OOM pandas
+# or run the function out of memory before the body finishes streaming.
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024
+
 
 class ConfigError(RuntimeError):
     """Configuration / infrastructure error whose message is safe to return
@@ -195,11 +200,25 @@ def sync_watchlist_to_supabase(wl: dict, run_id: str):
                 body=rows, prefer='resolution=merge-duplicates')
 
     if wl.get('cards'):
+        # Card-key contract: analyze.py builds keys as f"{bin}-{last4}" where
+        # both parts are zero-padded digit strings (bin = 6 digits, last4 = 4).
+        # The Supabase `card_key` column is a generated `bin || '-' || last4`,
+        # and `bin` / `last4` are `text not null`. If the analyze-side format
+        # ever drifts (e.g., to floats like "411111.0-1234.0"), the round-trip
+        # lookup breaks silently — fraud detectors lose the "known offender"
+        # signal but nothing errors. We validate the shape here and raise so
+        # the bad write is rejected at the boundary instead of corrupting
+        # the watchlist.
         rows = []
+        skipped = []
         for ck, entry in wl['cards'].items():
             try:
                 bin_, last4 = ck.split('-', 1)
             except ValueError:
+                skipped.append(ck)
+                continue
+            if not (bin_.isdigit() and last4.isdigit()):
+                skipped.append(ck)
                 continue
             rows.append({
                 'bin':           bin_,
@@ -209,6 +228,13 @@ def sync_watchlist_to_supabase(wl: dict, run_id: str):
                 'flag_count':    int(entry.get('flag_count', 1)),
                 'last_run_id':   run_id,
             })
+        if skipped:
+            raise ConfigError(
+                f'Watchlist sync rejected {len(skipped)} malformed card_key '
+                f'value(s) (expected "<digits>-<digits>"). First offender: '
+                f'{skipped[0]!r}. This indicates an evidence-row format '
+                f'change in analyze.py — fix the producer, not this check.'
+            )
         if rows:
             sb_rest('POST', 'watchlist_cards',
                     body=rows, prefer='resolution=merge-duplicates')
@@ -261,7 +287,11 @@ def insert_findings_history(run_id: str, findings: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_multipart(body: bytes, boundary: bytes):
-    """Minimal multipart/form-data parser — extracts the first file part as bytes.
+    """Minimal multipart/form-data parser — extracts the single file part.
+
+    Rejects bodies that contain more than one file part rather than silently
+    using the first one, so a caller that thinks they're uploading two files
+    finds out instead of getting partial processing.
 
     Hardenings vs. naive split:
     - Tolerates the leading CRLF that spec-compliant bodies put before each
@@ -272,6 +302,7 @@ def parse_multipart(body: bytes, boundary: bytes):
     """
     sep = b'--' + boundary
     parts = body.split(sep)
+    found = []
     for part in parts:
         if b'filename=' not in part:
             continue
@@ -301,8 +332,15 @@ def parse_multipart(body: bytes, boundary: bytes):
             if 'filename=' in line:
                 filename = line.split('filename=')[1].strip().strip('"')
                 break
-        return filename, content
-    raise ValueError('No file part found in multipart body')
+        found.append((filename, content))
+    if not found:
+        raise ValueError('No file part found in multipart body')
+    if len(found) > 1:
+        raise ValueError(
+            f'Expected exactly one file in upload, got {len(found)}. '
+            f'Upload one CSV at a time.'
+        )
+    return found[0]
 
 
 class handler(BaseHTTPRequestHandler):
@@ -338,9 +376,24 @@ class handler(BaseHTTPRequestHandler):
             if length <= 0:
                 self._send_json(400, {'error': 'Empty upload'})
                 return
+            if length > MAX_UPLOAD_BYTES:
+                # Client enforces the same limit in the UI; this catches forged
+                # requests that bypass the browser-side check.
+                self._send_json(413, {
+                    'error': f'Upload too large ({length} bytes). Limit is '
+                             f'{MAX_UPLOAD_BYTES} bytes (~4 MB). For monthly '
+                             f'files, run analyze.py locally.',
+                })
+                return
             body = self.rfile.read(length)
 
-            filename, csv_bytes = parse_multipart(body, boundary)
+            try:
+                filename, csv_bytes = parse_multipart(body, boundary)
+            except ValueError as parse_err:
+                # parse_multipart raises ValueError for malformed bodies (no
+                # file part, multiple parts). These are 400s, not 500s.
+                self._send_json(400, {'error': str(parse_err)})
+                return
 
             wl = load_watchlist_from_supabase()
 

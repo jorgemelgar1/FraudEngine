@@ -3,6 +3,7 @@
 import { Suspense, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { ALLOWED_EMAIL_DOMAIN } from '@/lib/config';
 
 export default function LoginPage() {
   return (
@@ -29,14 +30,12 @@ function LoginForm() {
     setSigningIn(true);
     const supabase = createClient();
     // Pre-filter Google's account picker to the configured Workspace domain.
-    // Reads from a public env var so it stays in sync with ALLOWED_EMAIL_DOMAIN
-    // on the server side; falls back to cubopago.com if unset.
-    const hd = process.env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN || 'cubopago.com';
+    // Single source: lib/config.ts.
     const { error: err } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
-        queryParams: { hd },
+        queryParams: { hd: ALLOWED_EMAIL_DOMAIN },
       },
     });
     if (err) {

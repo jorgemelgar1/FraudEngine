@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-
-const ALLOWED_DOMAIN = (process.env.ALLOWED_EMAIL_DOMAIN || 'cubopago.com').toLowerCase();
+import { ALLOWED_EMAIL_DOMAIN } from '@/lib/config';
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
@@ -25,7 +24,7 @@ export async function GET(request: Request) {
   // that window and signs them out before they can act on the session.
   const email = (data.user.email || '').toLowerCase();
   const parts = email.split('@');
-  if (parts.length !== 2 || parts[1] !== ALLOWED_DOMAIN) {
+  if (parts.length !== 2 || parts[1] !== ALLOWED_EMAIL_DOMAIN) {
     await supabase.auth.signOut();
     return NextResponse.redirect(`${origin}/login?error=domain`);
   }

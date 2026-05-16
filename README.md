@@ -125,6 +125,10 @@ In Supabase, go to **Project Settings → API**. You'll need four values:
 
 ### 5. Push this repo to GitHub
 
+Pick whichever path matches what's installed on your machine.
+
+**Option A — with the GitHub CLI (`gh`) installed:**
+
 ```bash
 git init
 git add .
@@ -132,7 +136,22 @@ git commit -m "Initial commit"
 gh repo create cubo-fraud-engine --private --source=. --push
 ```
 
-(Or create the repo manually on github.com and `git push` to it.)
+**Option B — without `gh` (browser + plain git):**
+
+1. Go to <https://github.com/new>, create a private repo named
+   `cubo-fraud-engine`, and **do not** initialize it with a README, license,
+   or `.gitignore` (this repo already has them).
+2. Copy the SSH or HTTPS URL GitHub shows you on the next page.
+3. From this folder:
+
+   ```bash
+   git init
+   git add .
+   git commit -m "Initial commit"
+   git branch -M main
+   git remote add origin <paste-the-URL-here>
+   git push -u origin main
+   ```
 
 ### 6. Deploy on Vercel
 
