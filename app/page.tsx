@@ -282,7 +282,7 @@ export default function HomePage() {
                     Suelta el CSV aquí, o haz clic para seleccionar
                   </p>
                   <p className="muted" style={{ margin: 0 }}>
-                    Tamaño máximo: 4 MB (un día de transacciones).
+                    Tamaño máximo: 4 MB (hasta 3 días de transacciones).
                   </p>
                 </>
               )}
