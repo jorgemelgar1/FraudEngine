@@ -63,7 +63,10 @@ npm run release
 
 This:
 - Compiles the Rust + JS into a release-mode .exe
-- Signs the .exe with the Tauri updater key (lives at `C:\Users\Jorge Melgar\.tauri\cubo-fraud-engine.key`, password `REDACTED`)
+- Signs the .exe with the Tauri updater key. The private key file lives
+  at `C:\Users\Jorge Melgar\.tauri\cubo-fraud-engine.key` and its password
+  lives in a sibling file `cubo-fraud-engine.password` in the same folder.
+  Neither file is in this repo. Back them up together.
 - Generates `latest.json` — the manifest the auto-updater reads
 
 When it finishes, three files end up in
@@ -143,6 +146,7 @@ message you send to teammates.
 | Tauri config (version, identifier, etc.) | `desktop/src-tauri/tauri.conf.json` |
 | Updater public key (embedded in app) | `desktop/src-tauri/tauri.conf.json → plugins.updater.pubkey` |
 | Updater private key (NEVER COMMIT) | `C:\Users\Jorge Melgar\.tauri\cubo-fraud-engine.key` |
+| Updater private key password (NEVER COMMIT) | `C:\Users\Jorge Melgar\.tauri\cubo-fraud-engine.password` |
 | Sidecar source | `desktop/python-src/main.py` |
 | Sidecar binary used by builds | `desktop/src-tauri/binaries/fraud-engine-sidecar-x86_64-pc-windows-msvc.exe` |
 | Release script | `desktop/scripts/build-release.mjs` |

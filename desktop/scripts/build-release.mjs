@@ -62,25 +62,41 @@ if (!existsSync(keyPath)) {
   process.exit(1);
 }
 
-// Password matches what was used when generating the key. Tauri 2 had a
-// regression that broke empty-password keys, so we use a real password.
-// If you regenerate the key, update this default OR set
-// TAURI_SIGNING_PRIVATE_KEY_PASSWORD in your shell before running this
-// script.
+// Resolve the signing password. Resolution order:
+//   1. $TAURI_SIGNING_PRIVATE_KEY_PASSWORD set in the shell (use this in CI)
+//   2. ~/.tauri/cubo-fraud-engine.password — a sibling file next to the
+//      private key, OUTSIDE the repo (the standard local-dev path)
 //
+// The password is NOT hardcoded in source — it used to be, briefly, in an
+// earlier version of this script. It now lives only on disk, alongside the
+// private key it unlocks. Back BOTH files up together; losing either one
+// breaks the auto-updater.
+const passwordPath = keyPath.replace(/\.key$/, '.password');
+let password = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
+if (!password) {
+  if (!existsSync(passwordPath)) {
+    console.error(
+      `[release] No signing password available.\n` +
+      `         Either set TAURI_SIGNING_PRIVATE_KEY_PASSWORD in your shell,\n` +
+      `         or create ${passwordPath} containing just the password string.`,
+    );
+    process.exit(1);
+  }
+  password = readFileSync(passwordPath, 'utf8').trim();
+}
+
 // Both `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PATH` are
 // supported by Tauri 2's CLI. Set both for defense-in-depth — different
 // internal code paths read different names.
 const env = {
   ...process.env,
-  TAURI_SIGNING_PRIVATE_KEY:      keyPath,
-  TAURI_SIGNING_PRIVATE_KEY_PATH: keyPath,
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
-    process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? 'REDACTED',
+  TAURI_SIGNING_PRIVATE_KEY:          keyPath,
+  TAURI_SIGNING_PRIVATE_KEY_PATH:     keyPath,
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: password,
 };
 
 console.log(`[release] Signing key:      ${keyPath}`);
-console.log(`[release] Signing password: ${env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD === 'REDACTED' ? '(using default)' : '(from environment)'}\n`);
+console.log(`[release] Signing password: ${process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ? '(from environment)' : `(from ${passwordPath})`}\n`);
 
 // ──────────────────────────────────────────────────────────────────────────
 // 3. Run the bundler. This is the slow part (8–15 min on a clean target/).
