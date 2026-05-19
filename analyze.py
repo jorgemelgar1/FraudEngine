@@ -722,9 +722,11 @@ def detect_duplicates(df_u, fraud_card_keys=None, fraud_merchants=None):
 
     df = df_u[(df_u['status'] == 'SUCCEEDED') & df_u['card_key'].notna()]
 
-    # Exclude transactions with critical codes or MinFraud blocks on the row itself
-    tainted_row = (df['rejection_reason'].apply(is_critical_code)
-                   | df['rejection_reason'].apply(is_minfraud_blocked))
+    # Exclude transactions with critical codes or MinFraud blocks on the row
+    # itself. Uses the precomputed `_is_critical_code` / `_is_minfraud_blocked`
+    # columns added at the top of analyze() — equivalent to the prior
+    # `.apply(is_critical_code)` but vectorized.
+    tainted_row = df['_is_critical_code'] | df['_is_minfraud_blocked']
     df = df[~tainted_row]
 
     # Exclude cards / merchants implicated by other detectors
@@ -930,6 +932,19 @@ def analyze(csv_path, watchlist_path=None):
     # Schema is validated inside load_and_dedupe before any columns get touched.
     df_raw, df_u = load_and_dedupe(csv_path)
 
+    # Precompute rejection-code classification masks ONCE on the full df_u
+    # instead of recomputing per-merchant via `.apply(is_critical_code)` etc.
+    # Same semantics as the row-level helpers: NaN → False; otherwise stringify
+    # and check set membership (critical) or substring (MinFraud).
+    #
+    # `fillna('').astype(str)` is a single pass; `.isin()` and `.str.contains()`
+    # are vectorized in C. The merchant loop later just slices these boolean
+    # columns by group index — turning O(merchants × rows-per-merchant) Python
+    # callable invocations into one C-level pass per CSV.
+    _reason_str = df_u['rejection_reason'].fillna('').astype(str)
+    df_u['_is_critical_code']    = _reason_str.isin(CRITICAL_CODES)
+    df_u['_is_minfraud_blocked'] = _reason_str.str.contains(MINFRAUD_SUBSTRING, regex=False, na=False)
+
     # Watchlist — both merchants and cards persist permanently once flagged.
     watchlist = load_watchlist(watchlist_path) if watchlist_path else {'merchants': {}, 'cards': {}}
     watchlist_merchants = set(watchlist['merchants'].keys())
@@ -1008,9 +1023,10 @@ def analyze(csv_path, watchlist_path=None):
         n_rej = int(rejected_mask.sum())
         n_succ = int(succeeded_mask.sum())
 
-        reason = group['rejection_reason']
-        critical_code_rows = group[reason.apply(is_critical_code)]
-        minfraud_rows = group[reason.apply(is_minfraud_blocked)]
+        # Use the precomputed masks from df_u (added once at the top of
+        # analyze()). Equivalent to apply(is_critical_code) but C-level.
+        critical_code_rows = group[group['_is_critical_code']]
+        minfraud_rows      = group[group['_is_minfraud_blocked']]
 
         cross_here = cross_by_merchant.get(mname, [])
         cross_card_keys = list({h['card_key'] for h in cross_here})
@@ -1262,7 +1278,10 @@ def build_description_es(mname, fingerprints, group, watchlist_merchants):
     if 'real_name_rotation' in fingerprints:
         pieces.append("Misma tarjeta con rotación de identidad (≥3 nombres, emails o teléfonos distintos).")
     if 'critical_codes' in fingerprints:
-        critical_count = sum(1 for r in group['rejection_reason'] if is_critical_code(r))
+        # Was: sum(1 for r in group['rejection_reason'] if is_critical_code(r)).
+        # The precomputed `_is_critical_code` column produces the same count
+        # without re-running the Python predicate per row.
+        critical_count = int(group['_is_critical_code'].sum())
         pieces.append(f"{critical_count} rechazos con códigos críticos (05, 63, 43, SM).")
     if 'watchlist_merchant' in fingerprints:
         pieces.append("REPEAT OFFENDER: ya flaggeado como crítico en los últimos 90 días.")
