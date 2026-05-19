@@ -1,0 +1,6 @@
+# Pinned to match production (root-level requirements.txt). The desktop
+# sidecar must produce byte-identical findings vs. the Vercel function, so
+# pandas and numpy are pinned exactly. PyInstaller is the bundler.
+pandas==2.2.3
+numpy==2.1.3
+pyinstaller==6.11.1

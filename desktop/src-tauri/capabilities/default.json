@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the main window: sidecar exec for the fraud engine, file-open dialog, deep-link callback for OAuth, and opening the system browser for the OAuth flow.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "deep-link:default",
+    "shell:allow-open",
+    "store:default",
+    "updater:default",
+    "process:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/fraud-engine-sidecar",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
+  ]
+}

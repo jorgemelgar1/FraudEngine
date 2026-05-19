@@ -1,0 +1,11 @@
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+src-tauri/binaries/
+python-bin/
+python-build/
+python-src/.venv/
+.env
+.env.local
+.env.*.local

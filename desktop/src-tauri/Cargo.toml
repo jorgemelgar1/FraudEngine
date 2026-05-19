@@ -1,0 +1,44 @@
+[package]
+name = "cubo-fraud-engine"
+version = "0.1.0"
+description = "Cubo Fraud Engine — desktop"
+authors = ["Cubo Pago"]
+edition = "2021"
+
+[lib]
+name = "cubo_fraud_engine_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-deep-link = "2"
+# The `deep-link` feature wires single-instance up to forward incoming
+# deep-link URLs from a second launch into the already-running process.
+# Without this, every OAuth callback from the system browser would spawn
+# a fresh copy of the app instead of routing the URL to the existing one.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Persistent JSON key-value store, used by Phase 4 (offline) to cache the
+# watchlist and queue failed syncs. Files live under %APPDATA% on Windows.
+tauri-plugin-store = "2"
+# Auto-updater: checks the configured endpoint on launch, verifies the
+# signed bundle against the embedded public key, and installs in-place
+# on user approval. Update payload is signed with the private key kept
+# outside the repo (~/.tauri/cubo-fraud-engine.key).
+tauri-plugin-updater = "2"
+# Process plugin: exposes the relaunch() command the updater needs to
+# restart the app after applying an update.
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
