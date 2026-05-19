@@ -1,0 +1,6 @@
+# Desktop app — separate Tauri project that lives in this repo but has
+# nothing to do with the Vercel-deployed Next.js app. Excluding it keeps
+# Vercel from trying to type-check the desktop's Tauri/React code (which
+# imports packages that only exist inside desktop/node_modules), and
+# shaves the uploaded payload by ~80 MB.
+desktop/
