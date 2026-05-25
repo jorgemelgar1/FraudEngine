@@ -230,6 +230,15 @@ def _compute_card_keys(df):
     ]
 
 
+def _read_csv_with_encoding_fallback(csv_path, **kwargs):
+    # Excel-on-Windows saves CSV as cp1252 by default, not UTF-8. Retry on
+    # UnicodeDecodeError so users don't have to re-export as "CSV UTF-8".
+    try:
+        return pd.read_csv(csv_path, **kwargs)
+    except UnicodeDecodeError:
+        return pd.read_csv(csv_path, encoding='cp1252', **kwargs)
+
+
 def load_and_dedupe(csv_path):
     """
     Load the CSV and deduplicate to one row per transaction_id
@@ -240,7 +249,7 @@ def load_and_dedupe(csv_path):
     KeyError from inside pd.to_datetime instead of the friendly
     "Missing required columns" error.
     """
-    df = pd.read_csv(csv_path, low_memory=False)
+    df = _read_csv_with_encoding_fallback(csv_path, low_memory=False)
     ok, missing_req, _ = validate_schema(df)
     if not ok:
         raise ValueError(f"Missing required columns: {missing_req}")
@@ -1352,7 +1361,7 @@ def main():
     args = parser.parse_args()
 
     if args.validate_only:
-        df = pd.read_csv(args.csv_path, nrows=5)
+        df = _read_csv_with_encoding_fallback(args.csv_path, nrows=5)
         ok, missing_req, missing_opt = validate_schema(df)
         print(json.dumps({
             'schema_ok': ok,
