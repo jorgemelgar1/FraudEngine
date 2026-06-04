@@ -14,6 +14,7 @@ type Findings = {
     unique_transactions?: number;
     total_critical_findings?: number;
     total_monitor_findings?: number;
+    total_suspicious_rejected_merchants?: number;
     estimated_chargeback_exposure?: number;
     currency?: string;
   };
@@ -27,6 +28,25 @@ type Findings = {
     company_name: string;
     risk_score: number;
     fingerprints: string[];
+  }>;
+  // Merchants with no successful transactions that look like card testing.
+  // Optional for backward compatibility with reports generated before this
+  // section shipped.
+  suspicious_rejected_merchants?: Array<{
+    company_name: string;
+    risk_score: number;
+    confidence: 'Critical' | 'Monitor';
+    fingerprints: string[];
+    description_es?: string;
+    recommended_action_es?: string;
+    currency?: string;
+    metrics?: {
+      attempts: number;
+      distinct_cards: number;
+      distinct_bins: number;
+      distinct_ips: number;
+      rejected_amount: number;
+    };
   }>;
   error?: string;
 };
@@ -273,6 +293,7 @@ function ReportView({
         <Kpi label="Transacciones únicas"   value={fmt(s.unique_transactions)} />
         <Kpi label="Hallazgos críticos"     value={fmt(s.total_critical_findings)} accent="critical" />
         <Kpi label="Hallazgos a monitorear" value={fmt(s.total_monitor_findings)}  accent="monitor" />
+        <Kpi label="Sin liquidación"        value={fmt(s.total_suspicious_rejected_merchants)} accent="monitor" />
         <Kpi label="Exposición a chargebacks"
              value={fmtCurrency(s.estimated_chargeback_exposure, currency)} />
       </div>
@@ -309,6 +330,48 @@ function ReportView({
                   <strong>{f.company_name}</strong>
                   <span className="score">Riesgo {f.risk_score}</span>
                 </div>
+                <div className="tags">
+                  {f.fingerprints.map((fp) => (
+                    <span className="tag" key={fp}>{fp}</span>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {findings.suspicious_rejected_merchants &&
+        findings.suspicious_rejected_merchants.length > 0 && (
+        <section>
+          <h3>
+            Comercios sin transacciones exitosas (
+            {findings.suspicious_rejected_merchants.length})
+          </h3>
+          <p className="phase-note">
+            Comercios que no liquidan ningún cargo pero muestran patrones de card
+            testing en sus rechazos. No generan exposición a chargebacks; indican
+            posible abuso de la cuenta para probar tarjetas robadas.
+          </p>
+          <ul className="findings">
+            {findings.suspicious_rejected_merchants.map((f, i) => (
+              <li
+                key={i}
+                className={`finding ${f.confidence === 'Critical' ? 'critical' : 'monitor'}`}
+              >
+                <div className="finding-head">
+                  <strong>{f.company_name}</strong>
+                  <span className="score">Riesgo {f.risk_score}</span>
+                </div>
+                {f.description_es && <p>{f.description_es}</p>}
+                {f.metrics && (
+                  <p className="phase-note" style={{ marginTop: 0 }}>
+                    {f.metrics.attempts} intentos · {f.metrics.distinct_cards} tarjetas
+                    {' · '}{f.metrics.distinct_bins} BINs · {f.metrics.distinct_ips} IP
+                    {' · '}monto rechazado{' '}
+                    {fmtCurrency(f.metrics.rejected_amount, f.currency || currency)}
+                  </p>
+                )}
                 <div className="tags">
                   {f.fingerprints.map((fp) => (
                     <span className="tag" key={fp}>{fp}</span>

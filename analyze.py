@@ -20,6 +20,7 @@ Design notes:
 """
 
 import argparse
+import difflib
 import json
 import os
 import sys
@@ -62,6 +63,101 @@ HIGH_RISK_SCORE_THRESHOLD = 90
 # is flagged as a foreign-card-velocity fraud indicator.
 FOREIGN_CARD_COUNT_THRESHOLD = 5
 FOREIGN_CARD_WINDOW_HOURS = 1
+
+
+# ---------------------------------------------------------------------------
+# Suspicious all-rejected merchants (no successful transactions)
+# ---------------------------------------------------------------------------
+#
+# A dedicated, self-contained detector for merchants that NEVER settle a charge
+# but show card-testing / stolen-card behavior across many rejected attempts.
+#
+# The legacy per-merchant risk model (score_merchant) is exposure-centric: it
+# scores SUCCEEDED charges and estimates chargeback exposure. A merchant whose
+# every attempt is rejected settles $0, so it scores ~0 and is invisible to the
+# Critical/Monitor tiers — even when it is an obvious card-testing session
+# (one device cycling many stolen cards under one or two identities).
+#
+# This detector runs INDEPENDENTLY. It has its own scoring, writes to its own
+# report section ('suspicious_rejected_merchants'), and deliberately does NOT
+# touch df_u, score_merchant, identify_test_transactions, the global rejection-
+# code sets, the watchlist update, or the existing critical/monitor findings.
+# Everything below is additive.
+#
+# It operates on an ATTEMPT-level view rebuilt locally from the raw CSV (one row
+# per transaction_id + last_intent_at + card) so that bursts of distinct cards
+# that the transaction_id-level dedupe collapses are visible here — without
+# changing the global dedupe every other detector relies on.
+
+# Terminal-status priority used to collapse a single attempt's
+# DRAFT→PENDING→REJECTED/SUCCEEDED rows down to its final state.
+_STATUS_RANK = {'SUCCEEDED': 4, 'REJECTED': 3, 'PENDING': 2, 'DRAFT': 1}
+
+# Channels where the `ip` column is the cardholder's own device (LINK / QR /
+# subscription / etc.). On POS the `ip` is the merchant's terminal, so per-IP
+# card fan-out is normal retail and must NOT trigger the IP-based signals.
+POS_CHANNELS = {'POS', 'POS-MSI'}
+
+# Entry gate: a merchant only enters this section if it has at least this many
+# attempts, settles at or below this success rate ("zero-settlement"), AND
+# touches at least this many distinct cards. The distinct-card floor keeps a
+# single customer retrying one blocked card out of the section (that is not
+# card testing).
+ZERO_SETTLEMENT_MIN_ATTEMPTS = 6
+ZERO_SETTLEMENT_MAX_SUCCESS_RATE = 0.05
+ZERO_SETTLEMENT_MIN_DISTINCT_CARDS = 2
+
+# Card fan-out tiers: distinct cards within a rolling window, cardholder-side.
+FANOUT_BURST_CARDS = 5                          # BIN-attack burst
+FANOUT_BURST_WINDOW = np.timedelta64(5, 'm')
+FANOUT_SESSION_CARDS = 3
+FANOUT_SESSION_WINDOW = np.timedelta64(60, 'm')
+FANOUT_SLOW_WINDOW = np.timedelta64(24, 'h')
+FANOUT_PAIR_CARDS = 2
+FANOUT_PAIR_WINDOW = np.timedelta64(30, 'm')
+
+# Single IP submitting many distinct cards (cardholder-side channels only).
+IP_MULTI_CARD_STRONG = 3
+IP_MULTI_CARD_WEAK = 2
+
+# Identity rotation: distinct cardholder names per payer (email), or distinct
+# cards per cardholder name.
+IDENTITY_ROTATION_COUNT = 3
+# Near-duplicate cardholder-name similarity (difflib ratio) — catches hand-keyed
+# variants like "Estuardo Corzo" / "Eduardo Cosa". Capped to keep the O(n²)
+# pairwise comparison cheap (the per-merchant name set is tiny in practice).
+NAME_SIMILARITY_RATIO = 0.80
+NAME_SIMILARITY_MAX_NAMES = 50
+# Near-duplicate BIN: same last4 + same holder, BINs differing by <= this many
+# characters — a hallmark of hand-keyed card re-entry (e.g. 439093 / 409393).
+BIN_NEAR_DUPLICATE_MAX_DIFF = 2
+
+# Same rejection code repeated on a single card (card-not-present probing).
+REPEAT_CODE_THRESHOLD = 4
+
+# Distinct cards across the whole all-fail session (card / BIN diversity).
+SESSION_CARD_DIVERSITY = 4
+
+# Section score weights (capped at 100). Independent of score_merchant.
+W_ZERO_SETTLEMENT    = 25   # base: passing the entry gate is itself a signal
+W_FANOUT_BURST       = 40
+W_FANOUT_SESSION     = 30
+W_FANOUT_SLOW        = 20
+W_FANOUT_PAIR        = 10
+W_IP_MULTI_STRONG    = 25
+W_IP_MULTI_WEAK      = 10
+W_IDENTITY_ROTATION  = 20
+W_NEAR_DUPLICATE     = 15
+W_REPEAT_CODE        = 20
+W_CARD_DIVERSITY     = 15
+W_WATCHLIST_MERCHANT = 20
+W_WATCHLIST_CARD     = 10
+
+# Tiering within the section (mirrors the engine's >=70/>=40 idea but tuned to
+# this section's weights). Zero-settlement alone (25) lands at Monitor; one
+# strong escalation pushes it to Critical.
+SECTION_CRITICAL_THRESHOLD = 50
+SECTION_MONITOR_THRESHOLD = 25
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +905,346 @@ def detect_abandoned_suspicious(df_u):
 
 
 # ---------------------------------------------------------------------------
+# Suspicious all-rejected-merchant detector (self-contained)
+# ---------------------------------------------------------------------------
+
+def _rejection_code(reason):
+    """Extract the stable code prefix from a rejection_reason string.
+
+    The description text after the code is inconsistent in the data (the same
+    numeric code carries different / misspelled descriptions, e.g. '14 - LLAMAR
+    EL EMISOR' vs '14 - LLAMAR AL EMISOR'), so we key off the prefix only.
+    MinFraud custom rules are normalized to a single 'MF: custom_rule' bucket.
+    """
+    if pd.isna(reason):
+        return None
+    s = str(reason).strip()
+    if not s:
+        return None
+    if s.startswith('MF: custom_rule'):
+        return 'MF: custom_rule'
+    if ' - ' in s:
+        return s.split(' - ', 1)[0].strip()
+    return s
+
+
+def _build_attempts(df_raw):
+    """Rebuild an ATTEMPT-level view from the raw (pre-dedupe) CSV.
+
+    One row per (transaction_id + last_intent_at + card), collapsing only a
+    single attempt's DRAFT→PENDING→REJECTED/SUCCEEDED status transitions down
+    to its terminal status. Distinct card attempts that the global
+    transaction_id-level dedupe would merge are preserved here.
+
+    Local to this detector — does not mutate df_raw or df_u.
+    """
+    df = df_raw.copy()
+    df['_card_key'] = _compute_card_keys(df)
+    # Composite, NaN-safe attempt id (string) so rows with a missing card_key
+    # are not silently dropped by a groupby on NaN keys.
+    txid = df['transaction_id'].astype('string').fillna('')
+    li = df['last_intent_at'].astype('string').fillna('')
+    ck = df['_card_key'].astype('string').fillna('')
+    df['_attempt_id'] = txid + '|' + li + '|' + ck
+    df['_rank'] = df['status'].map(_STATUS_RANK).fillna(0)
+    # Keep the terminal (highest-rank) row per attempt.
+    df = df.sort_values('_rank', kind='stable')
+    attempts = df.groupby('_attempt_id', sort=False).tail(1).copy()
+    return attempts
+
+
+def _max_distinct_in_window(times, keys, delta):
+    """Max number of distinct `keys` observed within any rolling `delta`
+    window. `times` must be sorted ascending. Two-pointer, O(n)."""
+    n = len(times)
+    counts = {}
+    j = 0
+    best = 0
+    for i in range(n):
+        limit = times[i] + delta
+        while j < n and times[j] <= limit:
+            counts[keys[j]] = counts.get(keys[j], 0) + 1
+            j += 1
+        if len(counts) > best:
+            best = len(counts)
+        k_out = keys[i]
+        counts[k_out] -= 1
+        if counts[k_out] == 0:
+            del counts[k_out]
+    return best
+
+
+def _has_near_duplicate_identity(ch):
+    """True if the merchant's cardholder-side attempts show hand-keyed identity
+    re-entry: near-duplicate holder names, or near-duplicate BINs sharing the
+    same last4 + holder."""
+    names = sorted({
+        str(n).strip() for n in ch['card_holder'] if is_real_name(n)
+    })[:NAME_SIMILARITY_MAX_NAMES]
+    for i in range(len(names)):
+        a = names[i].upper()
+        for k in range(i + 1, len(names)):
+            b = names[k].upper()
+            if a == b:
+                continue
+            if difflib.SequenceMatcher(None, a, b).ratio() >= NAME_SIMILARITY_RATIO:
+                return True
+
+    # Near-duplicate BINs with identical last4 + holder.
+    by_card = defaultdict(set)
+    sub = ch[ch['_card_key'].notna()]
+    for ck, holder in zip(sub['_card_key'], sub['card_holder']):
+        if not is_real_name(holder):
+            continue
+        bin_, last4 = ck.split('-')
+        by_card[(last4, str(holder).strip().upper())].add(bin_)
+    for bins in by_card.values():
+        bl = sorted(bins)
+        for i in range(len(bl)):
+            for k in range(i + 1, len(bl)):
+                if len(bl[i]) == len(bl[k]) and sum(
+                    c1 != c2 for c1, c2 in zip(bl[i], bl[k])
+                ) <= BIN_NEAR_DUPLICATE_MAX_DIFF:
+                    return True
+    return False
+
+
+def build_rejected_description_es(mname, fps, metrics, currency):
+    """Spanish description for a suspicious all-rejected merchant finding.
+    English DB field names are kept verbatim inside the Spanish prose, matching
+    the rest of the engine's output convention."""
+    pieces = [
+        f"{metrics['attempts']} intentos, {metrics['distinct_cards']} tarjetas "
+        f"distintas, {metrics['succeeded']} exitosas "
+        f"(tasa de éxito {metrics['success_rate'] * 100:.1f}%). "
+        f"Monto rechazado: {currency} {metrics['rejected_amount']:,.2f}."
+    ]
+    if 'card_fanout_burst' in fps:
+        pieces.append(
+            f"Ráfaga de BIN-attack: {metrics['max_cards_5min']} tarjetas distintas "
+            f"en <5 min sobre canales del tarjetahabiente (LINK/QR)."
+        )
+    elif 'card_fanout_session' in fps or 'card_fanout_slow' in fps:
+        pieces.append(
+            f"Fan-out de tarjetas en una misma sesión del merchant "
+            f"({metrics['max_cards_60min']} tarjetas distintas en la ventana)."
+        )
+    elif 'card_fanout_pair' in fps:
+        pieces.append("Dos tarjetas distintas en <30 min sobre canales del tarjetahabiente.")
+    if 'single_ip_multi_card' in fps:
+        pieces.append(
+            f"Una sola IP presentó {metrics['max_cards_per_ip']} tarjetas distintas "
+            f"(LINK/QR: la IP es el tarjetahabiente, no el terminal)."
+        )
+    if 'payer_identity_rotation' in fps:
+        pieces.append("Rotación de identidad: un pagador con múltiples nombres/tarjetas, o un mismo nombre sobre múltiples tarjetas.")
+    if 'near_duplicate_identity' in fps:
+        pieces.append("Nombres de tarjetahabiente o BINs casi idénticos — patrón de re-digitación manual de tarjetas.")
+    if 'repeated_decline_code' in fps:
+        pieces.append(
+            f"Mismo código de rechazo repetido en una tarjeta "
+            f"(código dominante '{metrics['top_code']}' ×{metrics['top_code_count']})."
+        )
+    if 'card_diversity' in fps:
+        pieces.append(f"Alta diversidad de tarjetas/BINs en sesión sin liquidación ({metrics['distinct_bins']} BINs).")
+    if 'watchlist_merchant' in fps:
+        pieces.append("REPEAT OFFENDER: merchant ya en watchlist.")
+    if 'watchlist_card' in fps:
+        pieces.append("Tarjeta(s) ya en watchlist.")
+    return " ".join(pieces)
+
+
+def detect_suspicious_rejected_merchants(
+    df_raw, watchlist_merchants, watchlist_cards, currency=DEFAULT_CURRENCY,
+):
+    """Return a list of findings for merchants with (near-)zero settlement that
+    show card-testing behavior. Self-contained — see the module-level note."""
+    attempts_all = _build_attempts(df_raw)
+    # Drop never-progressed drafts; they are not real attempts.
+    attempts_all = attempts_all[attempts_all['status'] != 'DRAFT']
+    if len(attempts_all) == 0:
+        return []
+
+    findings = []
+    for mname, m in attempts_all.groupby('company_name', sort=False):
+        n_attempts = len(m)
+        n_succ = int((m['status'] == 'SUCCEEDED').sum())
+        success_rate = n_succ / n_attempts if n_attempts else 0.0
+        distinct_cards = int(m['_card_key'].nunique())
+
+        # Entry gate: zero-settlement session touching >= 2 distinct cards.
+        if (n_attempts < ZERO_SETTLEMENT_MIN_ATTEMPTS
+                or success_rate > ZERO_SETTLEMENT_MAX_SUCCESS_RATE
+                or distinct_cards < ZERO_SETTLEMENT_MIN_DISTINCT_CARDS):
+            continue
+
+        score = W_ZERO_SETTLEMENT
+        fps = ['zero_settlement_session']
+
+        # Cardholder-side subset (exclude POS terminals) with valid card+time.
+        ch = m[~m['transaction_type'].isin(POS_CHANNELS)]
+        chc = ch[ch['_card_key'].notna() & ch['transaction_created_at'].notna()] \
+            .sort_values('transaction_created_at')
+
+        max_5 = max_60 = max_24 = max_30 = 0
+        if len(chc):
+            times = chc['transaction_created_at'].values
+            keys = chc['_card_key'].values
+            max_5 = _max_distinct_in_window(times, keys, FANOUT_BURST_WINDOW)
+            max_60 = _max_distinct_in_window(times, keys, FANOUT_SESSION_WINDOW)
+            max_24 = _max_distinct_in_window(times, keys, FANOUT_SLOW_WINDOW)
+            max_30 = _max_distinct_in_window(times, keys, FANOUT_PAIR_WINDOW)
+
+        # Card fan-out tier (highest matching tier only).
+        if max_5 >= FANOUT_BURST_CARDS:
+            score += W_FANOUT_BURST
+            fps.append('card_fanout_burst')
+        elif max_60 >= FANOUT_SESSION_CARDS:
+            score += W_FANOUT_SESSION
+            fps.append('card_fanout_session')
+        elif max_24 >= FANOUT_SESSION_CARDS:
+            score += W_FANOUT_SLOW
+            fps.append('card_fanout_slow')
+        elif max_30 >= FANOUT_PAIR_CARDS:
+            score += W_FANOUT_PAIR
+            fps.append('card_fanout_pair')
+
+        # Distinct cards per IP (cardholder-side only).
+        max_cards_per_ip = 0
+        if len(chc):
+            ip_cards = chc[chc['ip'].notna()].groupby('ip')['_card_key'].nunique()
+            max_cards_per_ip = int(ip_cards.max()) if len(ip_cards) else 0
+        if max_cards_per_ip >= IP_MULTI_CARD_STRONG:
+            score += W_IP_MULTI_STRONG
+            fps.append('single_ip_multi_card')
+        elif max_cards_per_ip >= IP_MULTI_CARD_WEAK:
+            score += W_IP_MULTI_WEAK
+            fps.append('single_ip_multi_card')
+
+        # Identity rotation (cardholder-side): distinct real names per payer
+        # email, or distinct cards per cardholder name.
+        rotated = False
+        chr_named = ch[ch['card_holder'].apply(is_real_name)]
+        if len(chr_named):
+            emails = chr_named['client_email'].astype('string').str.strip().str.lower()
+            has_email = emails.notna() & (emails != '')
+            if has_email.any():
+                names_per_email = chr_named[has_email].assign(_e=emails[has_email]) \
+                    .groupby('_e')['card_holder'] \
+                    .apply(lambda s: len({str(x).strip().upper() for x in s}))
+                if (names_per_email >= IDENTITY_ROTATION_COUNT).any():
+                    rotated = True
+            holder_norm = chr_named['card_holder'].astype(str).str.strip().str.upper()
+            cards_per_name = chr_named.assign(_h=holder_norm) \
+                .groupby('_h')['_card_key'].nunique()
+            if (cards_per_name >= IDENTITY_ROTATION_COUNT).any():
+                rotated = True
+        if rotated:
+            score += W_IDENTITY_ROTATION
+            fps.append('payer_identity_rotation')
+
+        if len(ch) and _has_near_duplicate_identity(ch):
+            score += W_NEAR_DUPLICATE
+            fps.append('near_duplicate_identity')
+
+        # Repeated same rejection code on a single card.
+        top_code, top_code_count = None, 0
+        rej = m[(m['status'] == 'REJECTED') & m['_card_key'].notna()].copy()
+        if len(rej):
+            rej['_code'] = rej['rejection_reason'].apply(_rejection_code)
+            rej = rej[rej['_code'].notna()]
+            if len(rej):
+                per_card_code = rej.groupby(['_card_key', '_code']).size()
+                if len(per_card_code) and int(per_card_code.max()) >= REPEAT_CODE_THRESHOLD:
+                    score += W_REPEAT_CODE
+                    fps.append('repeated_decline_code')
+                code_totals = rej.groupby('_code').size().sort_values(ascending=False)
+                top_code = str(code_totals.index[0])
+                top_code_count = int(code_totals.iloc[0])
+
+        distinct_bins = int(m['_card_key'].dropna().map(lambda k: k.split('-')[0]).nunique())
+        if distinct_cards >= SESSION_CARD_DIVERSITY:
+            score += W_CARD_DIVERSITY
+            fps.append('card_diversity')
+
+        if mname in watchlist_merchants:
+            score += W_WATCHLIST_MERCHANT
+            fps.append('watchlist_merchant')
+        if any(k in watchlist_cards for k in m['_card_key'].dropna().unique()):
+            score += W_WATCHLIST_CARD
+            fps.append('watchlist_card')
+
+        score = min(score, 100)
+        if score >= SECTION_CRITICAL_THRESHOLD:
+            confidence = 'Critical'
+        elif score >= SECTION_MONITOR_THRESHOLD:
+            confidence = 'Monitor'
+        else:
+            # Zero-settlement but no escalation signal — likely a blocked
+            # customer, not card testing. Precision over recall.
+            continue
+
+        rejected_amount = float(m[m['status'] != 'SUCCEEDED']['amount'].sum())
+        distinct_ips = int(chc['ip'].nunique()) if len(chc) else 0
+
+        metrics = {
+            'attempts': n_attempts,
+            'succeeded': n_succ,
+            'success_rate': round(success_rate, 4),
+            'distinct_cards': distinct_cards,
+            'distinct_bins': distinct_bins,
+            'distinct_ips': distinct_ips,
+            'rejected_amount': round(rejected_amount, 2),
+            'max_cards_5min': max_5,
+            'max_cards_60min': max_60,
+            'max_cards_per_ip': max_cards_per_ip,
+            'top_code': top_code,
+            'top_code_count': top_code_count,
+        }
+
+        # Evidence: first 5 attempts in time order.
+        ev_rows = m.sort_values('transaction_created_at').head(5)
+        evidence = []
+        for _, r in ev_rows.iterrows():
+            evidence.append({
+                'transaction_id': r['transaction_id'],
+                'amount': float(r['amount']) if pd.notna(r['amount']) else None,
+                'status': r['status'],
+                'transaction_type': r['transaction_type'],
+                'rejection_reason': r['rejection_reason'] if pd.notna(r['rejection_reason']) else None,
+                'timestamp': str(r['transaction_created_at']),
+                'card_bin': f"{int(r['bin_card_number']):06d}" if pd.notna(r['bin_card_number']) else None,
+                'card_last_digits': f"{int(r['card_last_digits']):04d}" if pd.notna(r['card_last_digits']) else None,
+                'card_holder': r['card_holder'] if pd.notna(r['card_holder']) else None,
+                'client_name': r['client_name'] if pd.notna(r.get('client_name')) else None,
+                'client_email': r['client_email'] if pd.notna(r.get('client_email')) else None,
+                'ip': r['ip'] if pd.notna(r['ip']) else None,
+            })
+
+        findings.append({
+            'type': 'zero_settlement_card_testing',
+            'company_name': mname,
+            'company_id': m['company_id'].iloc[0] if len(m) else '',
+            'risk_score': score,
+            'confidence': confidence,
+            'fingerprints': fps,
+            'description_es': build_rejected_description_es(mname, fps, metrics, currency),
+            'recommended_action_es': (
+                "Revisar y considerar congelar el merchant: sesión sin liquidación "
+                "con comportamiento de card testing. No hay exposición a chargebacks "
+                "(nada se liquidó), pero indica abuso de la cuenta para probar "
+                "tarjetas robadas."
+            ),
+            'action_code': 'REVIEW_MERCHANT',
+            'metrics': metrics,
+            'evidence': evidence,
+            'currency': currency,
+        })
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Risk scoring
 # ---------------------------------------------------------------------------
 
@@ -980,6 +1416,13 @@ def analyze(csv_path, watchlist_path=None):
     bin_diversity_bursts = detect_bin_diversity_burst(df_u)
     foreign_card_bursts = detect_foreign_card_velocity(df_u)
     abandoned = detect_abandoned_suspicious(df_u)
+
+    # Self-contained detector for merchants that never settle a charge but show
+    # card-testing behavior. Operates on its own attempt-level view of df_raw
+    # and writes only to its own report section — see the module-level note.
+    suspicious_rejected = detect_suspicious_rejected_merchants(
+        df_raw, watchlist_merchants, watchlist_cards, currency
+    )
 
     # Duplicates run last so we can exclude cards/merchants already flagged
     # by other detectors — a "duplicate" on a fraud-implicated card is fraud,
@@ -1198,6 +1641,18 @@ def analyze(csv_path, watchlist_path=None):
         reverse=True,
     )
 
+    # Section priority: Critical > Monitor > suspicious-rejected. A merchant
+    # that already surfaced in the existing Critical/Monitor tiers is shown
+    # there (the more important section) and dropped from the new section, so
+    # nothing is listed twice. The existing tiers are left untouched.
+    already_flagged = (
+        {f['company_name'] for f in critical_findings}
+        | {f['company_name'] for f in monitor_findings}
+    )
+    suspicious_rejected = [
+        f for f in suspicious_rejected if f['company_name'] not in already_flagged
+    ]
+
     # Watchlist hits
     watchlist_hits_merchants = [m for m in df_u['company_name'].unique() if m in watchlist_merchants]
 
@@ -1226,12 +1681,14 @@ def analyze(csv_path, watchlist_path=None):
         'currency': currency,
         'total_high_risk_score_transactions': len(high_risk_score_transactions),
         'total_foreign_card_velocity_merchants': len(foreign_card_bursts),
+        'total_suspicious_rejected_merchants': len(suspicious_rejected),
     }
 
     return {
         'summary': summary,
         'critical_findings': sorted(critical_findings, key=lambda x: -x['risk_score']),
         'monitor_findings': sorted(monitor_findings, key=lambda x: -x['risk_score']),
+        'suspicious_rejected_merchants': sorted(suspicious_rejected, key=lambda x: -x['risk_score']),
         'duplicate_findings': duplicates,
         'abandoned_findings': abandoned,
         'trends': {
@@ -1386,6 +1843,7 @@ def main():
     print(f"Watchlist hits: {s['total_watchlist_hits']}")
     print(f"High-risk-score transactions (>{HIGH_RISK_SCORE_THRESHOLD}): {s['total_high_risk_score_transactions']}")
     print(f"Merchants with foreign-card velocity: {s['total_foreign_card_velocity_merchants']}")
+    print(f"Suspicious all-rejected merchants (no settlement): {s['total_suspicious_rejected_merchants']}")
     print(f"Chargeback exposure estimate: {s.get('currency', DEFAULT_CURRENCY)} {s['estimated_chargeback_exposure']:,.2f}")
     print(f"Output written to: {output_path}")
 

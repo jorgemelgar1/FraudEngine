@@ -10,6 +10,9 @@ __pycache__/
 .venv/
 venv/
 
+# Generated test fixtures (regenerate with tests/make_fixtures.py)
+tests/fixtures/
+
 # Next.js
 .next/
 out/

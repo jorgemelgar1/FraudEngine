@@ -48,6 +48,36 @@ type MonitorFinding = {
   evidence_count: number;
 };
 
+// Merchants that never settle a charge but show card-testing behavior across
+// rejected attempts. Their own report section — not part of the watchlist
+// review pipeline, so no finding_id / accept-reject controls.
+type SuspiciousRejectedMerchant = {
+  type: string;
+  company_name: string;
+  company_id: string;
+  risk_score: number;
+  confidence: 'Critical' | 'Monitor';
+  fingerprints: string[];
+  description_es: string;
+  recommended_action_es: string;
+  action_code: string;
+  currency?: string;
+  metrics: {
+    attempts: number;
+    succeeded: number;
+    success_rate: number;
+    distinct_cards: number;
+    distinct_bins: number;
+    distinct_ips: number;
+    rejected_amount: number;
+    max_cards_5min: number;
+    max_cards_60min: number;
+    max_cards_per_ip: number;
+    top_code: string | null;
+    top_code_count: number;
+  };
+};
+
 type Findings = {
   run_id?: string;
   summary: {
@@ -64,9 +94,14 @@ type Findings = {
                         // multi-currency change shipped.
     total_high_risk_score_transactions: number;
     total_foreign_card_velocity_merchants: number;
+    total_suspicious_rejected_merchants?: number;  // optional: older reports
+                                                    // predate this section.
   };
   critical_findings: CriticalFinding[];
   monitor_findings: MonitorFinding[];
+  // Optional for backward compatibility with reports generated before the
+  // suspicious-rejected-merchant section shipped.
+  suspicious_rejected_merchants?: SuspiciousRejectedMerchant[];
 };
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4 MB — keep under Vercel's 4.5 MB request-body limit.
@@ -445,6 +480,10 @@ export default function HomePage() {
                   )}
                 />
                 <Kpi label="Tx alto riesgo" value={fmtNumber(results.summary.total_high_risk_score_transactions)} />
+                <Kpi
+                  label="Sin liquidación"
+                  value={fmtNumber(results.summary.total_suspicious_rejected_merchants ?? 0)}
+                />
               </div>
             </div>
 
@@ -519,7 +558,24 @@ export default function HomePage() {
               </div>
             )}
 
-            {results.critical_findings.length === 0 && results.monitor_findings.length === 0 && (
+            {(results.suspicious_rejected_merchants?.length ?? 0) > 0 && (
+              <div className="card">
+                <h3 style={{ marginTop: 0 }}>Comercios sin transacciones exitosas</h3>
+                <p className="muted" style={{ marginTop: 0, fontSize: '0.9rem' }}>
+                  Comercios que no liquidan ningún cargo pero muestran patrones de
+                  card testing en sus rechazos. No generan exposición a chargebacks
+                  (nada se liquidó), pero indican posible abuso de la cuenta para
+                  probar tarjetas robadas. No se actualiza la watchlist automáticamente.
+                </p>
+                {results.suspicious_rejected_merchants!.map((f, i) => (
+                  <RejectedMerchantCard key={i} finding={f} currency={results.summary.currency} />
+                ))}
+              </div>
+            )}
+
+            {results.critical_findings.length === 0 &&
+              results.monitor_findings.length === 0 &&
+              (results.suspicious_rejected_merchants?.length ?? 0) === 0 && (
               <div className="card">
                 <p className="success" style={{ margin: 0 }}>
                   No se detectó actividad sospechosa en este CSV.
@@ -632,6 +688,63 @@ function FindingCard({
       {action && (
         <p className="muted" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
           <strong>Acción:</strong> {action}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Card for the "Comercios sin transacciones exitosas" section. These findings
+// are not part of the watchlist review pipeline, so there are no accept/reject
+// controls — just the evidence ops needs to decide whether to freeze the
+// merchant. The tier comes from the finding's own `confidence` field.
+function RejectedMerchantCard({
+  finding,
+  currency,
+}: {
+  finding: SuspiciousRejectedMerchant;
+  currency?: string;
+}) {
+  const m = finding.metrics;
+  const isCritical = finding.confidence === 'Critical';
+  return (
+    <div className={`finding ${isCritical ? '' : 'monitor'}`}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        flexWrap: 'wrap',
+        gap: '0.5rem',
+      }}>
+        <div style={{ flex: '1 1 auto' }}>
+          <strong>{finding.company_name}</strong>
+          <span className="muted" style={{ marginLeft: '0.75rem' }}>
+            Riesgo: {finding.risk_score}
+          </span>
+        </div>
+        <span
+          className="tag"
+          style={isCritical
+            ? { background: 'rgba(255, 107, 53, 0.15)', color: 'var(--cubo-orange)' }
+            : undefined}
+        >
+          {isCritical ? 'Crítico' : 'Monitorear'}
+        </span>
+      </div>
+      <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>{finding.description_es}</p>
+      <div className="muted" style={{ fontSize: '0.85rem', marginBottom: '0.4rem' }}>
+        {m.attempts} intentos · {m.distinct_cards} tarjetas · {m.distinct_bins} BINs
+        {' · '}{m.distinct_ips} IP · monto rechazado{' '}
+        {fmtCurrency(m.rejected_amount, finding.currency || currency)}
+      </div>
+      <div>
+        {(finding.fingerprints || []).map((fp) => (
+          <span className="tag" key={fp}>{fp}</span>
+        ))}
+      </div>
+      {finding.recommended_action_es && (
+        <p className="muted" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
+          <strong>Acción:</strong> {finding.recommended_action_es}
         </p>
       )}
     </div>
