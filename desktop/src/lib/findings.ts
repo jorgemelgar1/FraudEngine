@@ -14,6 +14,7 @@ const LIST_SELECT = [
   'risk_score',
   'fingerprints',
   'action_code',
+  'section',
   'chargeback_exposure_usd',
   'chargeback_exposure_currency',
   'description_es',
@@ -36,6 +37,12 @@ export type PendingFinding = {
   risk_score: number;
   fingerprints: string[];
   action_code: string | null;
+  // Which detector produced this finding (migration 0007):
+  //   'exposure'        — chargeback-exposure model; carries an exposure amount.
+  //   'zero_settlement' — card-testing detector; settles $0, so
+  //                       chargeback_exposure_usd is always null.
+  // Optional so rows written before 0007 (which have no section) still parse.
+  section?: 'exposure' | 'zero_settlement';
   chargeback_exposure_usd: number | null;
   chargeback_exposure_currency: string | null;
   description_es: string | null;
@@ -65,6 +72,9 @@ export async function listPending(): Promise<PendingFinding[]> {
     .select(LIST_SELECT)
     // Only Critical findings need review. Monitor findings are inserted as
     // not_applicable by analyze.py and never enter the pending queue.
+    // Both sections are returned: the tier decides reviewability, not the
+    // detector, so a Critical from the zero-settlement section queues up
+    // alongside one from the exposure model.
     .eq('review_status', 'pending')
     .eq('confidence', 'Critical')
     .order('run_id', { ascending: false })

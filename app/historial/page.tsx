@@ -12,6 +12,9 @@ type HistoryFinding = {
   finding_type: string;
   risk_score: number;
   fingerprints: string[];
+  // Which detector produced this (migration 0007). Optional so rows written
+  // before that migration — which have no section — still render.
+  section?: 'exposure' | 'zero_settlement';
   chargeback_exposure_usd: number | null;
   chargeback_exposure_currency: string | null;
   description_es: string | null;
@@ -208,15 +211,34 @@ export default function HistorialPage() {
                           {fmtDateTime(f.reviewed_at)}
                         </td>
                         <td style={{ padding: '0.5rem 0.4rem' }}>
-                          <div style={{ fontWeight: 600 }}>{f.company_name}</div>
+                          <div style={{ fontWeight: 600 }}>
+                            {f.company_name}
+                            {f.section === 'zero_settlement' && (
+                              <span
+                                className="tag"
+                                style={{
+                                  marginLeft: '0.5rem',
+                                  background: 'rgba(255, 107, 53, 0.15)',
+                                  color: 'var(--cubo-orange)',
+                                }}
+                              >
+                                Sin liquidación
+                              </span>
+                            )}
+                          </div>
                           <div className="muted" style={{ fontSize: '0.8rem' }}>
                             {(f.fingerprints || []).slice(0, 3).join(', ')}
                             {f.fingerprints.length > 3 ? '…' : ''}
                           </div>
                         </td>
                         <td style={{ padding: '0.5rem 0.4rem' }}>{f.risk_score}</td>
+                        {/* Zero-settlement findings have no exposure by
+                            construction — an explicit n/a reads better than
+                            the generic dash used for missing data. */}
                         <td style={{ padding: '0.5rem 0.4rem', whiteSpace: 'nowrap' }}>
-                          {fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
+                          {f.section === 'zero_settlement'
+                            ? <span className="muted">n/a</span>
+                            : fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
                         </td>
                         <td style={{ padding: '0.5rem 0.4rem' }}>
                           <span

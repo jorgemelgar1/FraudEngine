@@ -3,10 +3,13 @@ Vercel Python Serverless Function — findings review endpoint.
 
 Two operations on /api/findings:
 
-  GET /api/findings?status=pending
-  GET /api/findings?status=history
+  GET /api/findings?status=pending[&section=exposure|zero_settlement]
+  GET /api/findings?status=history[&section=exposure|zero_settlement]
       List findings filtered by review state. Pending excludes Monitor
       (those are marked not_applicable on insert by /api/analyze).
+      Both report sections are returned unless `section` narrows it:
+      'exposure' is the chargeback-exposure model, 'zero_settlement' is
+      the card-testing detector (migration 0007).
 
   POST /api/findings
       Body: { "action": "accept" | "reject" | "undo", "finding_ids": [uuid, ...] }
@@ -132,33 +135,59 @@ def sb_rest(method: str, path: str, body=None, prefer: str = ''):
 # get slow at scale, paginate or trim payload here.
 _LIST_SELECT = (
     'id,run_id,company_name,company_id,finding_type,confidence,risk_score,'
-    'fingerprints,action_code,chargeback_exposure_usd,'
+    'fingerprints,action_code,section,chargeback_exposure_usd,'
     'chargeback_exposure_currency,description_es,review_status,reviewed_at,'
     'reviewed_by_email,review_notes,watchlist_delta,payload,'
     'analysis_runs(run_at,run_by_email,csv_filename,csv_date_start,csv_date_end)'
 )
 
+# Sections a caller may filter on. Anything else is rejected rather than
+# passed through to PostgREST, so a crafted `section=` value can't be used
+# to smuggle operators into the query string.
+_VALID_SECTIONS = ('exposure', 'zero_settlement')
 
-def list_pending():
-    """Critical findings awaiting review, newest run first."""
+
+def _section_filter(section):
+    """Return the PostgREST filter fragment for an optional section filter.
+
+    None / '' / 'all' means "both sections" and produces no filter, which is
+    the default the review screens use.
+    """
+    if not section or section == 'all':
+        return ''
+    if section not in _VALID_SECTIONS:
+        raise ValueError(f'Unknown section: {section!r}')
+    return f'&section=eq.{section}'
+
+
+def list_pending(section=None):
+    """Critical findings awaiting review, newest run first.
+
+    Covers both sections: the exposure model and the zero-settlement
+    card-testing detector both emit Critical findings that need a human
+    decision before they reach the watchlist. `section` narrows the list to
+    one of them; the default returns both.
+    """
     rows = sb_rest(
         'GET',
         f'findings_history?select={_LIST_SELECT}'
         f'&review_status=eq.pending'
         f'&confidence=eq.Critical'
+        f'{_section_filter(section)}'
         f'&order=run_id.desc,risk_score.desc'
         f'&limit=500',
     )
     return rows or []
 
 
-def list_history():
-    """Most-recent reviewed findings (accepted or rejected)."""
+def list_history(section=None):
+    """Most-recent reviewed findings (accepted or rejected), both sections."""
     rows = sb_rest(
         'GET',
         f'findings_history?select={_LIST_SELECT}'
         f'&review_status=in.(accepted,rejected)'
         f'&confidence=eq.Critical'
+        f'{_section_filter(section)}'
         f'&order=reviewed_at.desc'
         f'&limit=500',
     )
@@ -223,12 +252,17 @@ class handler(BaseHTTPRequestHandler):
             qs = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(qs)
             status = (params.get('status') or ['pending'])[0]
-            if status == 'pending':
-                self._send_json(200, {'findings': list_pending()})
-            elif status == 'history':
-                self._send_json(200, {'findings': list_history()})
-            else:
-                self._send_json(400, {'error': f'Unknown status: {status!r}'})
+            section = (params.get('section') or [None])[0]
+            try:
+                if status == 'pending':
+                    self._send_json(200, {'findings': list_pending(section)})
+                elif status == 'history':
+                    self._send_json(200, {'findings': list_history(section)})
+                else:
+                    self._send_json(400, {'error': f'Unknown status: {status!r}'})
+            except ValueError as e:
+                # Raised by _section_filter for an unrecognized section.
+                self._send_json(400, {'error': str(e)})
         except ConfigError as e:
             self._send_json(500, {'error': f'ConfigError: {e}'})
         except Exception as e:

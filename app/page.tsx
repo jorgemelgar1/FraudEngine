@@ -49,8 +49,9 @@ type MonitorFinding = {
 };
 
 // Merchants that never settle a charge but show card-testing behavior across
-// rejected attempts. Their own report section — not part of the watchlist
-// review pipeline, so no finding_id / accept-reject controls.
+// rejected attempts. Their own report section, but the same review pipeline
+// as the exposure findings: Critical ones land as 'pending' and carry a
+// finding_id so they can be accepted or discarded from this screen.
 type SuspiciousRejectedMerchant = {
   type: string;
   company_name: string;
@@ -76,6 +77,9 @@ type SuspiciousRejectedMerchant = {
     top_code: string | null;
     top_code_count: number;
   };
+  // Attached server-side after the findings row is inserted (Critical and
+  // Monitor alike); only Critical rows are actionable.
+  finding_id?: string;
 };
 
 type Findings = {
@@ -565,11 +569,27 @@ export default function HomePage() {
                   Comercios que no liquidan ningún cargo pero muestran patrones de
                   card testing en sus rechazos. No generan exposición a chargebacks
                   (nada se liquidó), pero indican posible abuso de la cuenta para
-                  probar tarjetas robadas. No se actualiza la watchlist automáticamente.
+                  probar tarjetas robadas. Los hallazgos Critical quedan pendientes
+                  de revisión: al aceptarlos se agregan el comercio y las tarjetas
+                  probadas a la Watchlist.
                 </p>
-                {results.suspicious_rejected_merchants!.map((f, i) => (
-                  <RejectedMerchantCard key={i} finding={f} currency={results.summary.currency} />
-                ))}
+                {results.suspicious_rejected_merchants!.map((f, i) => {
+                  const id = f.finding_id;
+                  const reviewedAs = id ? reviewedById[id] : undefined;
+                  const inflight = id ? reviewingIds.has(id) : false;
+                  const actionable = f.confidence === 'Critical' && !!id && !reviewedAs;
+                  return (
+                    <RejectedMerchantCard
+                      key={i}
+                      finding={f}
+                      currency={results.summary.currency}
+                      reviewState={reviewedAs}
+                      inflight={inflight}
+                      onAccept={actionable ? () => reviewFindings('accept', [id!]) : undefined}
+                      onReject={actionable ? () => reviewFindings('reject', [id!]) : undefined}
+                    />
+                  );
+                })}
               </div>
             )}
 
@@ -694,21 +714,38 @@ function FindingCard({
   );
 }
 
-// Card for the "Comercios sin transacciones exitosas" section. These findings
-// are not part of the watchlist review pipeline, so there are no accept/reject
-// controls — just the evidence ops needs to decide whether to freeze the
-// merchant. The tier comes from the finding's own `confidence` field.
+// Card for the "Comercios sin transacciones exitosas" section. Critical
+// findings here go through the same accept/discard flow as the exposure
+// findings — accepting one adds the merchant and the tested cards to the
+// watchlist. Monitor findings are informational and show no controls. The
+// tier comes from the finding's own `confidence` field.
 function RejectedMerchantCard({
   finding,
   currency,
+  reviewState,
+  inflight,
+  onAccept,
+  onReject,
 }: {
   finding: SuspiciousRejectedMerchant;
   currency?: string;
+  reviewState?: 'accepted' | 'rejected';
+  inflight?: boolean;
+  onAccept?: () => void;
+  onReject?: () => void;
 }) {
   const m = finding.metrics;
   const isCritical = finding.confidence === 'Critical';
+  const badge = reviewState === 'accepted'
+    ? { text: 'Aceptado ✓', bg: 'rgba(0, 201, 167, 0.15)', fg: 'var(--cubo-teal)' }
+    : reviewState === 'rejected'
+      ? { text: 'Descartado', bg: 'rgba(255, 107, 53, 0.15)', fg: 'var(--cubo-orange)' }
+      : null;
   return (
-    <div className={`finding ${isCritical ? '' : 'monitor'}`}>
+    <div
+      className={`finding ${isCritical ? '' : 'monitor'}`}
+      style={reviewState ? { opacity: 0.7 } : undefined}
+    >
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -722,14 +759,32 @@ function RejectedMerchantCard({
             Riesgo: {finding.risk_score}
           </span>
         </div>
-        <span
-          className="tag"
-          style={isCritical
-            ? { background: 'rgba(255, 107, 53, 0.15)', color: 'var(--cubo-orange)' }
-            : undefined}
-        >
-          {isCritical ? 'Crítico' : 'Monitorear'}
-        </span>
+        <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+          {badge ? (
+            <span className="tag" style={{ background: badge.bg, color: badge.fg }}>
+              {badge.text}
+            </span>
+          ) : (
+            <span
+              className="tag"
+              style={isCritical
+                ? { background: 'rgba(255, 107, 53, 0.15)', color: 'var(--cubo-orange)' }
+                : undefined}
+            >
+              {isCritical ? 'Crítico' : 'Monitorear'}
+            </span>
+          )}
+          {!badge && onAccept && (
+            <button className="signout" disabled={inflight} onClick={onAccept}>
+              Aceptar
+            </button>
+          )}
+          {!badge && onReject && (
+            <button className="signout" disabled={inflight} onClick={onReject}>
+              Descartar
+            </button>
+          )}
+        </div>
       </div>
       <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>{finding.description_es}</p>
       <div className="muted" style={{ fontSize: '0.85rem', marginBottom: '0.4rem' }}>

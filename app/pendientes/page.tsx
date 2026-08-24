@@ -14,6 +14,9 @@ type PendingFinding = {
   confidence: 'Critical';
   risk_score: number;
   fingerprints: string[];
+  // Which detector produced this (migration 0007). Optional so rows written
+  // before that migration — which have no section — still render.
+  section?: 'exposure' | 'zero_settlement';
   chargeback_exposure_usd: number | null;
   chargeback_exposure_currency: string | null;
   description_es: string | null;
@@ -45,6 +48,19 @@ const fmtCurrency = (n: number | null, code: string | null) => {
     return `${code || 'USD'} ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
 };
+
+// One-line stand-in for the exposure figure on zero-settlement findings,
+// pulled from the detector's own `metrics` block in the payload. Returns a
+// dash if the payload predates the metrics block or is shaped unexpectedly —
+// this is display-only, so it must never throw.
+function zeroSettlementSummary(payload: Record<string, unknown>): string {
+  const m = (payload as { metrics?: Record<string, unknown> })?.metrics;
+  if (!m) return 'Sin exposición (nada se liquidó)';
+  const attempts = Number(m.attempts ?? 0);
+  const cards = Number(m.distinct_cards ?? 0);
+  const ips = Number(m.distinct_ips ?? 0);
+  return `${attempts} intentos · ${cards} tarjetas · ${ips} IP`;
+}
 
 export default function PendientesPage() {
   const router = useRouter();
@@ -182,7 +198,9 @@ export default function PendientesPage() {
           <p className="muted" style={{ marginTop: 0 }}>
             Cada hallazgo Critical permanece pendiente hasta que un miembro del
             equipo lo acepte (se agrega a la Watchlist) o lo descarte. Los
-            falsos positivos descartados no afectan la Watchlist.
+            falsos positivos descartados no afectan la Watchlist. Se incluyen
+            tanto los hallazgos por exposición a chargebacks como los de
+            comercios <strong>sin liquidación</strong> (card testing).
           </p>
           {error && <div className="error" style={{ marginTop: '1rem' }}>{error}</div>}
           {findings === null && <p className="muted">Cargando…</p>}
@@ -252,12 +270,33 @@ export default function PendientesPage() {
                       }}>
                         <div style={{ flex: '1 1 320px' }}>
                           <strong>{f.company_name}</strong>
+                          {f.section === 'zero_settlement' && (
+                            <span
+                              className="tag"
+                              style={{
+                                marginLeft: '0.6rem',
+                                background: 'rgba(255, 107, 53, 0.15)',
+                                color: 'var(--cubo-orange)',
+                              }}
+                            >
+                              Sin liquidación
+                            </span>
+                          )}
                           <span className="muted" style={{ marginLeft: '0.75rem' }}>
                             Riesgo: {f.risk_score}
                           </span>
-                          <span className="muted" style={{ marginLeft: '0.75rem' }}>
-                            Exposición: {fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
-                          </span>
+                          {/* Zero-settlement findings settle nothing, so an
+                              exposure figure would always read "—". Show the
+                              card-testing metrics that justify the flag instead. */}
+                          {f.section === 'zero_settlement' ? (
+                            <span className="muted" style={{ marginLeft: '0.75rem' }}>
+                              {zeroSettlementSummary(f.payload)}
+                            </span>
+                          ) : (
+                            <span className="muted" style={{ marginLeft: '0.75rem' }}>
+                              Exposición: {fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
+                            </span>
+                          )}
                           <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>
                             {f.description_es}
                           </p>

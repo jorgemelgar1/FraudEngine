@@ -270,6 +270,9 @@ function ReportView({
               {sync.result.critical_inserted > 0 && (
                 <> · {sync.result.critical_inserted} crítico(s) pendientes de revisión</>
               )}
+              {sync.result.zero_settlement_inserted > 0 && (
+                <> · {sync.result.zero_settlement_inserted} sin liquidación</>
+              )}
             </p>
           )}
           {sync?.kind === 'queued' && (
@@ -351,7 +354,9 @@ function ReportView({
           <p className="phase-note">
             Comercios que no liquidan ningún cargo pero muestran patrones de card
             testing en sus rechazos. No generan exposición a chargebacks; indican
-            posible abuso de la cuenta para probar tarjetas robadas.
+            posible abuso de la cuenta para probar tarjetas robadas. Los que
+            aparecen como Critical quedan pendientes de revisión: al aceptarlos
+            se agregan el comercio y las tarjetas probadas a la Watchlist.
           </p>
           <ul className="findings">
             {findings.suspicious_rejected_merchants.map((f, i) => (

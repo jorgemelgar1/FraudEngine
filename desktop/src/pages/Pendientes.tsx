@@ -24,6 +24,19 @@ const fmtCurrency = (n: number | null, code: string | null) => {
   }
 };
 
+// One-line stand-in for the exposure figure on zero-settlement findings,
+// pulled from the detector's own `metrics` block in the payload. Returns a
+// generic line if the payload predates the metrics block or is shaped
+// unexpectedly — this is display-only, so it must never throw.
+function zeroSettlementSummary(payload: Record<string, unknown>): string {
+  const m = (payload as { metrics?: Record<string, unknown> })?.metrics;
+  if (!m) return 'Sin exposición (nada se liquidó)';
+  const attempts = Number(m.attempts ?? 0);
+  const cards = Number(m.distinct_cards ?? 0);
+  const ips = Number(m.distinct_ips ?? 0);
+  return `${attempts} intentos · ${cards} tarjetas · ${ips} IP`;
+}
+
 export function Pendientes({
   session, online, onChanged,
 }: {
@@ -203,11 +216,21 @@ export function Pendientes({
                     <div className="finding-head">
                       <div style={{ flex: '1 1 320px' }}>
                         <strong>{f.company_name}</strong>
+                        {f.section === 'zero_settlement' && (
+                          <span className="tag zero-settlement" style={{ marginLeft: '0.6rem' }}>
+                            Sin liquidación
+                          </span>
+                        )}
                         <span className="muted small" style={{ marginLeft: '0.75rem' }}>
                           Riesgo: {f.risk_score}
                         </span>
+                        {/* Zero-settlement findings settle nothing, so an
+                            exposure figure would always read "—". Show the
+                            card-testing metrics that justify the flag instead. */}
                         <span className="muted small" style={{ marginLeft: '0.75rem' }}>
-                          Exposición: {fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
+                          {f.section === 'zero_settlement'
+                            ? zeroSettlementSummary(f.payload)
+                            : `Exposición: ${fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}`}
                         </span>
                       </div>
                       <div className="row-actions">

@@ -200,6 +200,11 @@ def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict
         'unique_transactions':           summary.get('unique_transactions'),
         'critical_findings_count':       summary.get('total_critical_findings'),
         'monitor_findings_count':        summary.get('total_monitor_findings'),
+        # Zero-settlement (card-testing) section — both tiers. Column added in
+        # migration 0007; the key is absent from reports generated before the
+        # detector shipped, so .get() leaves it NULL rather than 0 (a genuine
+        # "this run predates the section" vs. "this run found none").
+        'zero_settlement_findings_count': summary.get('total_suspicious_rejected_merchants'),
         'chargeback_exposure_usd':       summary.get('estimated_chargeback_exposure'),
         'chargeback_exposure_currency':  summary.get('currency', 'USD'),
         'summary':                       summary,
@@ -211,10 +216,42 @@ def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict
     return res[0]['id']
 
 
-def insert_findings_history(run_id: str, findings: dict):
+def build_findings_rows(run_id: str, findings: dict):
+    """Return (ordered, rows) for the findings_history insert.
+
+    Pure — no network, no Supabase. Split out from insert_findings_history so
+    the section / review-status / exposure mapping can be unit-tested without
+    standing up a database (see tests/test_persistence.py).
+
+    Three report sections land in the same table, distinguished by the
+    `section` column (migration 0007):
+
+      exposure         critical_findings + monitor_findings — the legacy
+                       chargeback-exposure model.
+      zero_settlement  suspicious_rejected_merchants — the card-testing
+                       detector. Settles $0, so it carries no exposure
+                       amount, but its evidence cards are the cards being
+                       tested and belong on the watchlist once accepted.
+
+    Review status is decided by tier, not by section: Critical needs a human
+    decision before it touches the watchlist (migration 0004), Monitor is
+    recorded for the audit trail but stays out of the pending queue.
+
+    `ordered` is the parallel list of (finding_dict, section) in the exact
+    order the rows are sent, so the caller can zip returned ids back onto the
+    in-memory finding objects.
+    """
     summary_currency = (findings.get('summary') or {}).get('currency', 'USD')
+
+    # Order matters: PostgREST returns inserted rows in the order we send them.
+    ordered = (
+        [(f, 'exposure') for f in findings.get('critical_findings', [])]
+        + [(f, 'exposure') for f in findings.get('monitor_findings', [])]
+        + [(f, 'zero_settlement') for f in findings.get('suspicious_rejected_merchants', [])]
+    )
+
     rows = []
-    for f in findings.get('critical_findings', []) + findings.get('monitor_findings', []):
+    for f, section in ordered:
         confidence = f.get('confidence')
         # Critical findings need human review before they update the watchlist
         # (migration 0004). Monitor findings never wrote to the watchlist, so
@@ -229,6 +266,9 @@ def insert_findings_history(run_id: str, findings: dict):
             'risk_score':                   f.get('risk_score'),
             'fingerprints':                 f.get('fingerprints', []),
             'action_code':                  f.get('action_code'),
+            'section':                      section,
+            # Zero-settlement findings have no exposure by construction —
+            # .get() yields None, which is exactly the NULL the column wants.
             'chargeback_exposure_usd':      f.get('estimated_chargeback_exposure'),
             # Per-finding currency falls back to the run's currency. Monitor
             # findings don't carry an exposure, so the currency is informational
@@ -238,23 +278,25 @@ def insert_findings_history(run_id: str, findings: dict):
             'review_status':                review_status,
             'payload':                      f,
         })
-    if rows:
-        inserted = sb_rest(
-            'POST', 'findings_history',
-            body=rows, prefer='return=representation',
-        )
-        # PostgREST returns inserted rows in the same order we sent them
-        # (critical first, then monitor — see the loop above). Attach each
-        # row's id back onto the in-memory finding object so the report
-        # screen can call /api/findings without re-fetching.
-        if inserted and len(inserted) == len(rows):
-            critical = findings.get('critical_findings', [])
-            monitor  = findings.get('monitor_findings', [])
-            for i, row in enumerate(inserted):
-                if i < len(critical):
-                    critical[i]['finding_id'] = row['id']
-                else:
-                    monitor[i - len(critical)]['finding_id'] = row['id']
+
+    return ordered, rows
+
+
+def insert_findings_history(run_id: str, findings: dict):
+    """Write every finding from the report into findings_history."""
+    ordered, rows = build_findings_rows(run_id, findings)
+    if not rows:
+        return
+
+    inserted = sb_rest(
+        'POST', 'findings_history',
+        body=rows, prefer='return=representation',
+    )
+    # Attach each row's id back onto the in-memory finding object so the
+    # report screen can call /api/findings without re-fetching.
+    if inserted and len(inserted) == len(ordered):
+        for (f, _section), row in zip(ordered, inserted):
+            f['finding_id'] = row['id']
 
 
 # ─────────────────────────────────────────────────────────────────────────────

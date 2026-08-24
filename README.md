@@ -20,11 +20,14 @@ report. Watchlist persists across runs in Supabase. CSV data is never stored.
 ├── lib/supabase/           ← Supabase client helpers (browser + server)
 ├── public/                 ← Static assets (favicon)
 ├── middleware.ts           ← Protects every route with login + email-domain check
-├── supabase/migrations/
-│   ├── 0001_init.sql            ← Initial tables (run once)
-│   ├── 0002_watchlist_triggers.sql  ← Watchlist correctness triggers (run once)
-│   ├── 0003_currency.sql        ← Multi-currency column on audit rows (run once)
-│   └── 0004_findings_review.sql ← Human-in-the-loop watchlist review (run once)
+├── supabase/migrations/         ← Run each once, in order (all idempotent)
+│   ├── 0001_init.sql            ← Initial tables
+│   ├── 0002_watchlist_triggers.sql  ← Watchlist correctness triggers
+│   ├── 0003_currency.sql        ← Multi-currency column on audit rows
+│   ├── 0004_findings_review.sql ← Human-in-the-loop watchlist review
+│   ├── 0005_desktop_inserts.sql ← RLS insert policies for the desktop app
+│   ├── 0006_review_rpcs_security_definer.sql ← Let the desktop call review RPCs
+│   └── 0007_zero_settlement_persistence.sql  ← Persist the card-testing section
 ├── package.json            ← Next.js dependencies
 ├── requirements.txt        ← Python dependencies for the serverless function
 ├── next.config.mjs         ← Next.js build config
@@ -77,7 +80,21 @@ You'll do this once. The order matters.
    the review-flow change**, otherwise new Critical findings will land
    without a `review_status` value and `/api/findings` writes will
    fail.
-7. All scripts are idempotent so you can re-run safely if anything fails.
+7. Repeat for `supabase/migrations/0005_desktop_inserts.sql` (RLS
+   policies that let the desktop app insert runs and findings under
+   each user's own JWT — the service-role key can never ship inside a
+   distributed `.exe`). Only needed if your team uses the desktop app.
+8. Repeat for `supabase/migrations/0006_review_rpcs_security_definer.sql`
+   (makes the three review RPCs `SECURITY DEFINER` so the desktop app's
+   user-JWT calls can take the row locks they need). Pairs with 0005.
+9. Repeat for `supabase/migrations/0007_zero_settlement_persistence.sql`
+   (adds `findings_history.section` and
+   `analysis_runs.zero_settlement_findings_count` so the card-testing
+   section is persisted and reviewable alongside the exposure findings).
+   **Run this before deploying the persistence change**, otherwise
+   `/api/analyze` will fail with a "column does not exist" error from
+   PostgREST on the first upload.
+10. All scripts are idempotent so you can re-run safely if anything fails.
 
 ### 3. Configure Supabase Auth (Google OAuth via Cubo Workspace)
 

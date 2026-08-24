@@ -5,17 +5,25 @@ Every teammate's installed copy will auto-update on next launch.
 
 ## TL;DR (the four commands)
 
+Every command below runs from the repo's `desktop` folder and uses only
+relative paths, so it works wherever the repo lives. Start with:
+
+```powershell
+cd <your-clone>\desktop     # e.g. "C:\Users\Jorge Melgar\Documents\Cubo Pago\Claude Code Fraud Engine\desktop"
+```
+
 ```powershell
 # 1. Edit src-tauri/tauri.conf.json — bump "version" (e.g., "0.1.0" → "0.2.0")
-# 2. (Optional) Rebuild the Python sidecar if analyze.py changed:
+
+# 2. (Conditional) Rebuild the Python sidecar if analyze.py changed:
 #    (only needed if you edited the engine itself)
-cd "C:\Users\Jorge Melgar\Desktop\Claude Code Fraud Engine\desktop"
-.\python-src\.venv\Scripts\pyinstaller.exe --onefile --noconfirm --clean `
+$repo = (Resolve-Path ..).Path
+& .\python-src\.venv\Scripts\python.exe -m PyInstaller --onefile --noconfirm --clean `
   --name fraud-engine-sidecar `
   --distpath python-bin `
   --workpath python-build `
   --specpath python-build `
-  --paths "C:\Users\Jorge Melgar\Desktop\Claude Code Fraud Engine" `
+  --paths $repo `
   python-src\main.py
 Copy-Item python-bin\fraud-engine-sidecar.exe `
   src-tauri\binaries\fraud-engine-sidecar-x86_64-pc-windows-msvc.exe -Force
@@ -28,6 +36,13 @@ npm run release
 
 The slow step is #3 — about 8–15 minutes the first time, ~3 minutes on
 re-runs because Rust caches its work.
+
+> **Why `python.exe -m PyInstaller` and not `pyinstaller.exe`?** The `.exe`
+> shims inside a uv-created venv are trampolines with the venv's absolute
+> path baked in. Move or rename the repo and every one of them breaks with
+> `uv trampoline failed to canonicalize script path`. Invoking the module
+> through `python.exe` sidesteps the shim entirely and keeps working after a
+> move. See Troubleshooting below if you hit it anyway.
 
 ## Step-by-step
 
@@ -57,7 +72,7 @@ those changes up automatically.
 ### 3. Build the signed release
 
 ```powershell
-cd "C:\Users\Jorge Melgar\Desktop\Claude Code Fraud Engine\desktop"
+cd <your-clone>\desktop
 npm run release
 ```
 
@@ -123,6 +138,27 @@ setup step), edit [INSTALACION.md](INSTALACION.md) and update the Slack
 message you send to teammates.
 
 ## Troubleshooting
+
+**`uv trampoline failed to canonicalize script path`**
+- The venv at `desktop/python-src/.venv` was created at a different absolute
+  path than where the repo sits now (someone moved or renamed the folder).
+  The `.exe` shims in `.venv\Scripts\` hardcode that old path.
+- Quick fix: invoke through the interpreter instead of the shim —
+  `& .\python-src\.venv\Scripts\python.exe -m PyInstaller ...` (that's what
+  the TL;DR does).
+- Proper fix: recreate the venv. From `desktop\python-src`:
+  ```powershell
+  Remove-Item .venv -Recurse -Force
+  uv venv .venv --python 3.13
+  $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
+  uv pip install -r requirements.txt
+  ```
+
+**Rust build errors mentioning a path the repo no longer lives at**
+- e.g. `\\?\C:\Users\...\Desktop\Claude Code Fraud Engine\...`. Cargo caches
+  absolute paths inside `target/`, and a repo move poisons them.
+- Fix: `Remove-Item desktop\src-tauri\target -Recurse -Force`, then re-run
+  `npm run release`. Costs ~5 extra minutes for a from-scratch Rust compile.
 
 **"npm run release" fails immediately with "key not found"**
 - The private key got moved or deleted. Check `C:\Users\Jorge Melgar\.tauri\cubo-fraud-engine.key`. If it's gone, you can't sign updates — every install would have to be done manually until you reinstall a new version with a new pubkey baked in. **Back this file up.**

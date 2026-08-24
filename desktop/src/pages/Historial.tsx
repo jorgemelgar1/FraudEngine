@@ -145,15 +145,27 @@ export function Historial({
                   <tr key={f.id}>
                     <td className="nowrap">{fmtDateTime(f.reviewed_at)}</td>
                     <td>
-                      <div style={{ fontWeight: 600 }}>{f.company_name}</div>
+                      <div style={{ fontWeight: 600 }}>
+                        {f.company_name}
+                        {f.section === 'zero_settlement' && (
+                          <span className="tag zero-settlement" style={{ marginLeft: '0.5rem' }}>
+                            Sin liquidación
+                          </span>
+                        )}
+                      </div>
                       <div className="muted small">
                         {(f.fingerprints || []).slice(0, 3).join(', ')}
                         {f.fingerprints.length > 3 ? '…' : ''}
                       </div>
                     </td>
                     <td>{f.risk_score}</td>
+                    {/* Zero-settlement findings have no exposure by
+                        construction — an explicit n/a reads better than the
+                        generic dash used for missing data. */}
                     <td className="nowrap">
-                      {fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
+                      {f.section === 'zero_settlement'
+                        ? <span className="muted">n/a</span>
+                        : fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
                     </td>
                     <td>
                       <span className={`tag decision ${f.review_status}`}>

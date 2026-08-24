@@ -395,6 +395,14 @@ section h3 { margin: 0 0 0.75rem; }
   color: var(--cubo-orange);
 }
 
+/* Marks a finding as coming from the zero-settlement (card-testing)
+   detector rather than the chargeback-exposure model. Used on the
+   Pendientes and Historial rows, where both sections are interleaved. */
+.tag.zero-settlement {
+  background: rgba(255, 107, 53, 0.15);
+  color: var(--cubo-orange);
+}
+
 /* Offline / sync indicators */
 .status-dot {
   display: inline-block;

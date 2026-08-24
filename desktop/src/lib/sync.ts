@@ -32,17 +32,23 @@ type Findings = {
     unique_transactions?: number;
     total_critical_findings?: number;
     total_monitor_findings?: number;
+    total_suspicious_rejected_merchants?: number;
     estimated_chargeback_exposure?: number;
     currency?: string;
   };
   critical_findings?: Finding[];
   monitor_findings?: Finding[];
+  // Zero-settlement card-testing section. Optional: reports produced by a
+  // sidecar built before the detector shipped don't have the key, and a
+  // queued run from that era can still drain through here.
+  suspicious_rejected_merchants?: Finding[];
 };
 
 export type SyncResult = {
   run_id: string;
   critical_inserted: number;
   monitor_inserted: number;
+  zero_settlement_inserted: number;
 };
 
 // Mirror of api/analyze.py:insert_run_audit + insert_findings_history.
@@ -72,6 +78,10 @@ export async function syncFindings(
       unique_transactions:          summary.unique_transactions ?? null,
       critical_findings_count:      summary.total_critical_findings ?? null,
       monitor_findings_count:       summary.total_monitor_findings ?? null,
+      // Column added in migration 0007. `?? null` rather than `?? 0` so a
+      // run whose sidecar predates the detector is stored as "unknown"
+      // instead of claiming it found zero.
+      zero_settlement_findings_count: summary.total_suspicious_rejected_merchants ?? null,
       chargeback_exposure_usd:      summary.estimated_chargeback_exposure ?? null,
       chargeback_exposure_currency: currency,
       summary:                      summary,
@@ -85,11 +95,21 @@ export async function syncFindings(
   const runId = runRows.id as string;
 
   // 2. All findings in one batched insert. Critical findings land as
-  // 'pending' so they show up on the Vercel /pendientes screen for human
-  // review (same review-status rule as api/analyze.py).
+  // 'pending' so they show up on the /pendientes screen for human review
+  // (same review-status rule as api/analyze.py) — and that rule is by TIER,
+  // not by section, so a Critical from the zero-settlement detector is
+  // reviewable exactly like one from the exposure model.
+  //
+  // `section` (migration 0007) is what tells the two apart downstream.
   const critical = findings.critical_findings || [];
   const monitor  = findings.monitor_findings  || [];
-  const rows = [...critical, ...monitor].map((f) => ({
+  const zeroSettlement = findings.suspicious_rejected_merchants || [];
+  const tagged: Array<{ f: Finding; section: 'exposure' | 'zero_settlement' }> = [
+    ...critical.map((f) => ({ f, section: 'exposure' as const })),
+    ...monitor.map((f) => ({ f, section: 'exposure' as const })),
+    ...zeroSettlement.map((f) => ({ f, section: 'zero_settlement' as const })),
+  ];
+  const rows = tagged.map(({ f, section }) => ({
     run_id:                       runId,
     company_name:                 f.company_name ?? null,
     company_id:                   f.company_id   ?? null,
@@ -98,6 +118,9 @@ export async function syncFindings(
     risk_score:                   f.risk_score   ?? null,
     fingerprints:                 f.fingerprints ?? [],
     action_code:                  f.action_code  ?? null,
+    section,
+    // Zero-settlement findings settle nothing, so this is always null for
+    // them — which is the correct value, not a missing one.
     chargeback_exposure_usd:      f.estimated_chargeback_exposure ?? null,
     chargeback_exposure_currency: f.currency ?? currency,
     description_es:               f.description_es ?? null,
@@ -105,23 +128,26 @@ export async function syncFindings(
     payload:                      f,
   }));
 
-  let inserted = 0;
   if (rows.length > 0) {
-    const { error: findErr, count } = await supabase
+    const { error: findErr } = await supabase
       .from('findings_history')
-      .insert(rows, { count: 'exact' });
+      .insert(rows);
     if (findErr) {
       // The run row is already in the database; surfacing this lets the
       // user re-trigger sync from a future "retry" button if we add one.
       throw new Error(`Run guardado, pero falló al guardar findings: ${findErr.message}`);
     }
-    inserted = count ?? rows.length;
   }
 
+  // Counts come from what we sent, not from the insert response: the insert
+  // is all-or-nothing (a failure throws above), so on success every row
+  // landed. Deriving monitor_inserted by subtraction used to under-report
+  // whenever the server returned a null count.
   return {
     run_id: runId,
-    critical_inserted: critical.length,
-    monitor_inserted:  Math.max(0, inserted - critical.length),
+    critical_inserted:        critical.length,
+    monitor_inserted:         monitor.length,
+    zero_settlement_inserted: zeroSettlement.length,
   };
 }
 
