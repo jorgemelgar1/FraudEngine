@@ -189,6 +189,7 @@ export default function PendientesPage() {
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <Link href="/" className="signout">Inicio</Link>
           <Link href="/historial" className="signout">Historial</Link>
+          <Link href="/indicadores" className="signout">Indicadores</Link>
         </div>
       </header>
 

@@ -147,6 +147,7 @@ export default function HistorialPage() {
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <Link href="/" className="signout">Inicio</Link>
           <Link href="/pendientes" className="signout">Pendientes</Link>
+          <Link href="/indicadores" className="signout">Indicadores</Link>
         </div>
       </header>
 

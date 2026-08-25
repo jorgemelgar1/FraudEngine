@@ -16,6 +16,7 @@ import { LoginScreen } from './components/LoginScreen';
 import { Analyzer } from './pages/Analyzer';
 import { Pendientes } from './pages/Pendientes';
 import { Historial } from './pages/Historial';
+import { Indicadores } from './pages/Indicadores';
 
 // App is the shell: it owns auth state, the active view, online/offline
 // status, and the pending-count + sync-queue badges in the header. Each
@@ -219,6 +220,9 @@ export default function App() {
       )}
       {view === 'historial' && (
         <Historial session={session} online={online} onChanged={refreshPendingCount} />
+      )}
+      {view === 'indicadores' && (
+        <Indicadores session={session} online={online} />
       )}
     </div>
   );

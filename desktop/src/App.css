@@ -403,6 +403,83 @@ section h3 { margin: 0 0 0.75rem; }
   color: var(--cubo-orange);
 }
 
+/* ── Confirmed-fraud indicators ─────────────────────────────────────── */
+
+.mono {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.88em;
+}
+
+/* Provenance list under each merchant in the indicator-match section. */
+.indicator-hits {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.indicator-hits li {
+  font-size: 0.86rem;
+  line-height: 1.45;
+  padding-left: 0.7rem;
+  border-left: 2px solid var(--border);
+}
+
+/* Indicator entry form. Auto-fit keeps it two-up on a wide window and
+   single-column on a narrow one without a media query. */
+.ind-form {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+.ind-form label,
+.report label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.report select,
+.report input[type="text"],
+.report input:not([type]),
+.report textarea {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #FFFFFF;
+  color: var(--cubo-navy);
+  font-family: inherit;
+  font-size: 0.92rem;
+}
+.report textarea { resize: vertical; min-height: 5rem; }
+.report select:focus-visible,
+.report input:focus-visible,
+.report textarea:focus-visible {
+  outline: 2px solid var(--cubo-teal);
+  outline-offset: 1px;
+}
+.report select:disabled { background: var(--cubo-white); color: var(--text-muted); }
+
+/* Indicator list table. Shares the Historial table look but needs its own
+   horizontal scroll container — value + provenance columns get wide. */
+.table-wrap { overflow-x: auto; margin-top: 0.75rem; }
+.table-wrap table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 0.9rem; }
+.table-wrap th, .table-wrap td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.table-wrap thead th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.table-wrap tbody tr:last-child td { border-bottom: none; }
+
 /* Offline / sync indicators */
 .status-dot {
   display: inline-block;

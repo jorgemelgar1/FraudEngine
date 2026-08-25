@@ -3,10 +3,12 @@ Vercel Python Serverless Function — fraud-analysis endpoint.
 
 Flow per request:
   1.  Validate the caller's Supabase JWT and email domain.
-  2.  Pull the current watchlist (merchants + cards) from Supabase.
-  3.  Stage the watchlist + the uploaded CSV in /tmp (per-request RAM, wiped after).
+  2.  Pull the current watchlist (merchants + cards) and the active
+      confirmed-fraud indicators from Supabase.
+  3.  Stage both + the uploaded CSV in /tmp (per-request RAM, wiped after).
   4.  Invoke the existing analyze.py exactly as the CLI does.
-  5.  Sync the updated watchlist + audit row + findings back to Supabase.
+  5.  Sync the audit row + findings back to Supabase, and bump hit counts
+      for any indicator that fired.
   6.  Return the findings JSON to the browser. The CSV is never persisted.
 
 All Supabase access goes through urllib (no supabase-py) so this works
@@ -182,6 +184,51 @@ def load_watchlist_from_supabase() -> dict:
             'flag_count':    c.get('flag_count', 1),
         }
     return wl
+
+
+def load_indicators_from_supabase() -> list:
+    """Active confirmed-fraud indicators, shaped for analyze.py.
+
+    Explicit limit for the same reason load_watchlist_from_supabase has one:
+    PostgREST caps at 1000 rows by default, and silently losing indicators
+    would mean silently missing confirmed fraud.
+    """
+    rows = sb_rest(
+        'GET',
+        'fraud_indicators'
+        '?select=id,indicator_type,value_raw,value_norm,match_mode,source,'
+        'source_company_name,added_by_email,added_at,expires_at,active,notes'
+        '&active=eq.true'
+        '&limit=100000',
+    ) or []
+    return rows
+
+
+def record_indicator_hits(findings: dict):
+    """Bump hit_count / last_hit_at for every indicator that fired.
+
+    Best-effort by design: the analysis already succeeded and the user is
+    waiting on the report, so a bookkeeping failure must not turn a good run
+    into a 500. One RPC call per merchant keeps it to a handful of round
+    trips even on a busy file.
+    """
+    matches = findings.get('indicator_matches') or []
+    if not matches:
+        return
+    for match in matches:
+        ids = sorted({h.get('indicator_id') for h in match.get('hits', [])
+                      if h.get('indicator_id')})
+        if not ids:
+            continue
+        try:
+            sb_rest('POST', 'rpc/record_indicator_hits', body={
+                'p_indicator_ids': ids,
+                'p_company_name': match.get('company_name'),
+            })
+        except ConfigError as e:
+            # Log the shape of the failure, never the indicator values.
+            print(f'[indicators] hit recording failed: {type(e).__name__}')
+            return
 
 
 def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict) -> str:
@@ -413,14 +460,21 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             wl = load_watchlist_from_supabase()
+            indicators = load_indicators_from_supabase()
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                csv_path = os.path.join(tmpdir, 'input.csv')
-                wl_path  = os.path.join(tmpdir, 'wl.json')
+                csv_path  = os.path.join(tmpdir, 'input.csv')
+                wl_path   = os.path.join(tmpdir, 'wl.json')
+                ind_path  = os.path.join(tmpdir, 'indicators.json')
                 with open(csv_path, 'wb') as f:
                     f.write(csv_bytes)
                 with open(wl_path, 'w') as f:
                     json.dump(wl, f, default=str)
+                # Staged in the same per-request tmpdir as the CSV and wiped
+                # with it. This file holds confirmed-fraud personal data, so
+                # it must not outlive the request any more than the CSV does.
+                with open(ind_path, 'w', encoding='utf-8') as f:
+                    json.dump(indicators, f, default=str)
 
                 # Wrap the pandas/numpy analysis in a tight try/except.
                 # Pandas exceptions can embed CSV row values in their messages
@@ -429,7 +483,11 @@ class handler(BaseHTTPRequestHandler):
                 # message and never the traceback — to keep CSV-derived data
                 # out of Vercel function logs.
                 try:
-                    findings = fraud_engine.analyze(csv_path, watchlist_path=wl_path)
+                    findings = fraud_engine.analyze(
+                        csv_path,
+                        watchlist_path=wl_path,
+                        indicators_path=ind_path,
+                    )
                 except Exception as analysis_err:
                     print(
                         f'[req {request_id}] Analysis failed: '
@@ -446,6 +504,7 @@ class handler(BaseHTTPRequestHandler):
             # member reviews and accepts each via /api/findings.
             run_id = insert_run_audit(user_id, email, filename, findings)
             insert_findings_history(run_id, findings)
+            record_indicator_hits(findings)
 
             findings['run_id'] = run_id
             self._send_json(200, findings)

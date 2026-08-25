@@ -1245,6 +1245,619 @@ def detect_suspicious_rejected_merchants(
 
 
 # ---------------------------------------------------------------------------
+# Confirmed-fraud indicators
+# ---------------------------------------------------------------------------
+#
+# Values the team has confirmed are linked to fraud — an email from a
+# chargeback report, a cardholder name from a bank notice, an IP from a
+# previous case. Stored in Supabase (migration 0008) and handed to the engine
+# as a JSON file, the same way the watchlist already is.
+#
+# The signal this exists to catch is CROSS-MERCHANT: a payer identity
+# confirmed as fraud at merchant A turning up at merchant B. Each indicator
+# remembers where it was confirmed (`source_company_name`) so a hit somewhere
+# else is distinguishable from the same merchant re-offending.
+#
+# Two match tiers, deliberately asymmetric:
+#
+#   exact  A normalized value matches exactly. This is analyst-confirmed
+#          fraud data, so it FLOORS the merchant's risk score at the Critical
+#          line rather than adding points. It cannot be diluted by a low
+#          score elsewhere, and it needs no weight change — which is why it
+#          ships while the scoring weights stay frozen.
+#
+#   fuzzy  A near match (name variant, same email local part on a new host,
+#          neighbouring BIN). Adds points like any other signal — and is
+#          therefore GATED OFF until the weights are recalibrated, because
+#          the score already saturates at 100 on ordinary card-testing
+#          patterns and extra points would land on a maxed-out score and do
+#          nothing. See tests/CALIBRATION.md.
+#
+# Constants live here rather than at the top of the file because this block
+# is self-contained: nothing outside it reads them.
+
+# Turn on only after the W_* weights have been recalibrated against a real
+# CSV. Until then fuzzy hits are still computed and reported (so analysts can
+# see them and judge the rules), they just don't move the score.
+ENABLE_FUZZY_INDICATOR_SCORING = False
+
+# Exact hit floors the merchant here. 70 is the engine's existing Critical
+# line — max() rather than assignment so a merchant that independently scored
+# 95 is not demoted.
+INDICATOR_EXACT_FLOOR = 70
+
+# Points a fuzzy hit contributes once scoring is enabled.
+W_INDICATOR_FUZZY = 15
+
+# Name / company similarity for fuzzy matching. Reuses the same ratio the
+# engine already applies to near-duplicate cardholder names so the two ideas
+# of "similar name" stay consistent.
+INDICATOR_NAME_RATIO = NAME_SIMILARITY_RATIO
+
+# Free-mail and disposable hosts can never be email_domain indicators: a hit
+# would fire on a large share of all legitimate traffic. Rejected at write
+# time by the UI and again here, so a value that slipped into the table
+# before this list grew still can't do damage.
+UNINDEXABLE_EMAIL_DOMAINS = {
+    'gmail.com', 'googlemail.com', 'hotmail.com', 'outlook.com', 'live.com',
+    'yahoo.com', 'yahoo.es', 'icloud.com', 'me.com', 'aol.com', 'proton.me',
+    'protonmail.com', 'msn.com', 'gmx.com', 'mail.com', 'zoho.com',
+}
+
+# Local parts too generic to identify a person.
+UNINDEXABLE_EMAIL_LOCALS = {
+    'info', 'admin', 'contacto', 'ventas', 'soporte', 'ayuda', 'hola',
+    'no-reply', 'noreply', 'test', 'pagos', 'facturacion',
+}
+
+# Reserved / shared IP space that identifies a network, not a device.
+UNINDEXABLE_IPS = {'127.0.0.1', '0.0.0.0', '::1', 'localhost'}
+
+# Gmail-class hosts treat dots in the local part as cosmetic.
+_GMAIL_CLASS = {'gmail.com', 'googlemail.com'}
+
+# Legal suffixes stripped before comparing company names.
+_COMPANY_SUFFIXES = {
+    'sa', 'sadecv', 'srl', 'ltda', 'ltd', 'inc', 'llc', 'corp', 'co',
+    'cv', 'de', 'sas', 'eirl',
+}
+
+# Which CSV columns feed which indicator type. A person_name indicator is
+# checked against BOTH the embossed cardholder name and the payer name,
+# because a confirmed fraudster shows up in either field depending on channel.
+INDICATOR_SOURCE_COLUMNS = {
+    # Cards are always BIN + last 4 together. Neither half identifies a card
+    # on its own: a BIN is an entire issuing bank (every Visa debit card from
+    # one bank shares it), and last-4 is one in ten thousand. Offering either
+    # alone would guarantee false positives, so the type does not exist.
+    'card_key':     ['card_key'],
+    'email':        ['client_email'],
+    'email_domain': ['client_email'],
+    'phone':        ['client_phone'],
+    'ip':           ['ip'],
+    'person_name':  ['card_holder', 'client_name'],
+    'company_name': ['company_name'],
+    'company_id':   ['company_id'],
+}
+
+INDICATOR_TYPES = tuple(INDICATOR_SOURCE_COLUMNS.keys())
+
+# Types where a near match is meaningful. Everything else is exact-only —
+# a card_key or company_id that is nearly right is simply a different value.
+# A card_key is deliberately absent: "nearly the same card" is a different
+# card, and near-BIN matching was only meaningful when BINs stood alone.
+FUZZY_CAPABLE_TYPES = {'email', 'person_name', 'company_name', 'ip'}
+
+
+def _accent_fold(s: str) -> str:
+    """Strip the accents that appear in Latin American name data."""
+    for a, b in (('á', 'a'), ('é', 'e'), ('í', 'i'), ('ó', 'o'), ('ú', 'u'),
+                 ('ñ', 'n'), ('ü', 'u'), ('Á', 'A'), ('É', 'E'), ('Í', 'I'),
+                 ('Ó', 'O'), ('Ú', 'U'), ('Ñ', 'N'), ('Ü', 'U')):
+        s = s.replace(a, b)
+    return s
+
+
+def _norm_digits(v, keep_last=None):
+    """Digits only. `keep_last` trims to the last N — used for phone numbers,
+    where the same line appears with and without a country code."""
+    if v is None:
+        return None
+    d = ''.join(ch for ch in str(v) if ch.isdigit())
+    if not d:
+        return None
+    if keep_last and len(d) >= keep_last:
+        d = d[-keep_last:]
+    return d or None
+
+
+def norm_email(v):
+    """Lowercase; drop +tags; drop dots in the local part for Gmail-class
+    hosts only (they are cosmetic there and significant everywhere else)."""
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if '@' not in s or s.startswith('@') or s.endswith('@'):
+        return None
+    local, _, domain = s.rpartition('@')
+    local = local.split('+')[0]
+    if domain in _GMAIL_CLASS:
+        local = local.replace('.', '')
+    if not local or not domain:
+        return None
+    return f'{local}@{domain}'
+
+
+def norm_email_domain(v):
+    """Domain portion of an address, or a bare domain typed on its own."""
+    if v is None:
+        return None
+    s = str(v).strip().lower().lstrip('@')
+    if '@' in s:
+        s = s.rpartition('@')[2]
+    s = s.strip()
+    return s or None
+
+
+def norm_phone(v):
+    """Last 8 digits. Guatemalan and Salvadoran numbers are 8 digits; the
+    export carries them with and without the country code depending on
+    channel, so the tail is the stable part."""
+    return _norm_digits(v, keep_last=8)
+
+
+def norm_ip(v):
+    """Trim and lowercase. Deliberately not parsed into an ipaddress object:
+    the column occasionally carries proxy chains and we would rather compare
+    the raw token than silently drop a malformed one."""
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    # Take the first hop of an X-Forwarded-For style chain.
+    if ',' in s:
+        s = s.split(',')[0].strip()
+    return s or None
+
+
+def norm_person_name(v):
+    """Uppercase, accent-fold, drop punctuation, sort tokens.
+
+    Token sorting collapses "PEREZ JUAN" and "JUAN PEREZ" onto one key, which
+    matters because the cardholder field and the payer field order names
+    differently. Placeholder values (PAYWAVE/VISA and friends) are rejected —
+    they are not identities.
+    """
+    if v is None:
+        return None
+    # Placeholder check runs on the RAW value: CONTACTLESS_PLACEHOLDERS holds
+    # entries in the exact case the export produces ('no-name' lowercase,
+    # 'PAYWAVE/VISA' uppercase), so upper-casing first would miss half of them.
+    if not is_real_name(v):
+        return None
+    s = _accent_fold(str(v).strip().upper())
+    s = ''.join(ch if ch.isalnum() or ch.isspace() else ' ' for ch in s)
+    tokens = [t for t in s.split() if t]
+    if not tokens:
+        return None
+    return ' '.join(sorted(tokens))
+
+
+def norm_company_name(v):
+    """Like a person name but strips legal suffixes, which vary between how a
+    merchant registers and how the export renders them."""
+    if v is None:
+        return None
+    s = _accent_fold(str(v).strip().upper())
+    # Periods are DELETED rather than turned into spaces so "S.A." collapses
+    # to the token "SA" and gets recognised as a legal suffix. Splitting it
+    # into "S" and "A" would leave two tokens the suffix list can't match.
+    s = s.replace('.', '')
+    s = ''.join(ch if ch.isalnum() or ch.isspace() else ' ' for ch in s)
+    tokens = [t for t in s.split() if t and t.lower() not in _COMPANY_SUFFIXES]
+    if not tokens:
+        return None
+    return ' '.join(tokens)
+
+
+def norm_card_bin(v):
+    """6- or 8-digit BIN. The column arrives as a float in some exports, so
+    digits-only handles the trailing '.0'."""
+    d = _norm_digits(v)
+    if not d:
+        return None
+    if len(d) >= 8:
+        return d[:8]
+    return d[:6].zfill(6) if len(d) >= 6 else d.zfill(6)
+
+
+def norm_card_last4(v):
+    d = _norm_digits(v)
+    return d[-4:].zfill(4) if d else None
+
+
+# Separators an analyst might paste between BIN and last 4. Comma is
+# excluded on purpose: the UI splits bulk input on commas, so allowing it
+# here would turn one card into two broken values.
+_CARD_KEY_SEPARATORS = ('-', ' ', '/', '|', ':', '	')
+
+
+def norm_card_key(v):
+    """Normalize a BIN + last-4 pair to 'BBBBBB-LLLL'.
+
+    Accepts the shapes a chargeback report or a pasted spreadsheet actually
+    produces: '411111-1234', '411111 1234', '411111/1234', or the two halves
+    run together as 10 or 12 digits.
+
+    A full card number is REFUSED rather than reduced to its BIN and last 4.
+    Accepting one would mean the untouched PAN lands in `value_raw`, and the
+    desktop client writes that column directly with no way to canonicalize
+    it first. Refusing is the only behavior both clients can guarantee.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+
+    for sep in _CARD_KEY_SEPARATORS:
+        if sep in s:
+            b, _, l4 = s.partition(sep)
+            nb, nl = norm_card_bin(b), norm_card_last4(l4)
+            # A 6/8-digit BIN and a 4-digit tail, nothing longer.
+            if nb and nl and len(_norm_digits(b) or '') in (6, 8)                     and len(_norm_digits(l4) or '') == 4:
+                return f'{nb}-{nl}'
+            return None
+
+    digits = _norm_digits(s)
+    if not digits:
+        return None
+    if len(digits) == 10:            # 6-digit BIN + last 4
+        return f'{digits[:6]}-{digits[-4:]}'
+    if len(digits) == 12:            # 8-digit BIN + last 4
+        return f'{digits[:8]}-{digits[-4:]}'
+    return None
+
+
+def norm_generic(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+# norm_card_bin / norm_card_last4 stay as helpers for norm_card_key even
+# though neither is a selectable indicator type any more.
+INDICATOR_NORMALIZERS = {
+    'card_key':     norm_card_key,
+    'email':        norm_email,
+    'email_domain': norm_email_domain,
+    'phone':        norm_phone,
+    'ip':           norm_ip,
+    'person_name':  norm_person_name,
+    'company_name': norm_company_name,
+    'company_id':   norm_generic,
+}
+
+
+def normalize_indicator_value(indicator_type, value):
+    """Public entry point used by the engine AND by the write path, so a value
+    is normalized identically whether it is being stored or matched."""
+    fn = INDICATOR_NORMALIZERS.get(indicator_type)
+    if fn is None:
+        return None
+    try:
+        return fn(value)
+    except Exception:
+        # A malformed cell must never take down a run.
+        return None
+
+
+def indicator_rejection_reason(indicator_type, value_norm):
+    """Return why this value is unusable as an indicator, or None if it's fine.
+
+    Called by the UI before saving and by the engine when loading, so a value
+    that predates a growth of these lists still can't fire.
+    """
+    if not value_norm:
+        return 'El valor no se pudo normalizar (formato no reconocido).'
+    if len(value_norm) < 2:
+        return 'El valor es demasiado corto.'
+
+    if indicator_type == 'email_domain' and value_norm in UNINDEXABLE_EMAIL_DOMAINS:
+        return (f'"{value_norm}" es un dominio de correo público. Coincidiría con '
+                f'una gran parte del tráfico legítimo. Usa el correo completo.')
+    if indicator_type == 'email':
+        local = value_norm.split('@')[0]
+        if local in UNINDEXABLE_EMAIL_LOCALS:
+            return f'"{local}@" es un buzón genérico, no identifica a una persona.'
+    if indicator_type == 'ip' and value_norm in UNINDEXABLE_IPS:
+        return f'"{value_norm}" es una dirección reservada, no identifica un dispositivo.'
+    if indicator_type == 'person_name' and len(value_norm.split()) < 2:
+        return ('Un solo nombre o apellido genera demasiados falsos positivos. '
+                'Usa el nombre completo.')
+    return None
+
+
+def card_key_input_error(raw):
+    """Why this card entry is unusable, or None if it parses.
+
+    Separate from indicator_rejection_reason because it inspects the RAW
+    input: once normalization has failed the shape is gone, and 'no se pudo
+    normalizar' is useless feedback when the fix is 'you pasted a full card
+    number'.
+    """
+    if raw is None or not str(raw).strip():
+        return 'Escribe el BIN y los últimos 4 dígitos.'
+    digits = _norm_digits(raw) or ''
+    if len(digits) > 12:
+        return ('Parece un número de tarjeta completo. Registra solo el BIN '
+                '(6 u 8 dígitos) y los últimos 4 — el número completo no se '
+                'almacena nunca.')
+    if norm_card_key(raw) is None:
+        return ('Formato no reconocido. Usa BIN y últimos 4, por ejemplo '
+                '«411111-1234» o «411111 1234».')
+    return None
+
+
+class FraudIndicatorSet:
+    """Matches a CSV against the confirmed-fraud indicator list.
+
+    Built once per run. Exact matching is a hash lookup vectorized with
+    .isin() over a normalized column — the same technique the rejection-code
+    masks use. Fuzzy matching is blocked on a cheap key so it stays linear in
+    practice rather than comparing every indicator against every row.
+    """
+
+    def __init__(self, indicators):
+        self.by_type = defaultdict(dict)   # type -> {value_norm: [indicator, ...]}
+        self.fuzzy_by_type = defaultdict(list)
+        self.count = 0
+
+        now = datetime.now(timezone.utc)
+        for ind in indicators or []:
+            itype = ind.get('indicator_type')
+            if itype not in INDICATOR_SOURCE_COLUMNS:
+                continue
+            if not ind.get('active', True):
+                continue
+
+            expires = ind.get('expires_at')
+            if expires and _parse_ts(expires) and _parse_ts(expires) < now:
+                continue
+
+            # Re-normalize rather than trusting the stored value: if the
+            # normalizer has changed since the row was written, the engine's
+            # version is the authority.
+            vnorm = normalize_indicator_value(itype, ind.get('value_raw') or ind.get('value_norm'))
+            if indicator_rejection_reason(itype, vnorm):
+                continue
+
+            rec = {
+                'id': ind.get('id'),
+                'indicator_type': itype,
+                'value_raw': ind.get('value_raw'),
+                'value_norm': vnorm,
+                'match_mode': ind.get('match_mode', 'exact'),
+                'source': ind.get('source'),
+                'source_company_name': ind.get('source_company_name'),
+                'added_by_email': ind.get('added_by_email'),
+                'added_at': ind.get('added_at'),
+                'notes': ind.get('notes'),
+            }
+            mode = rec['match_mode']
+            if mode in ('exact', 'both'):
+                self.by_type[itype].setdefault(vnorm, []).append(rec)
+            if mode in ('fuzzy', 'both') and itype in FUZZY_CAPABLE_TYPES:
+                self.fuzzy_by_type[itype].append(rec)
+            self.count += 1
+
+    def __len__(self):
+        return self.count
+
+    # ── Matching ─────────────────────────────────────────────────────────
+
+    def match_frame(self, df):
+        """Return {company_name: [hit, ...]} for every indicator that fires.
+
+        One hit per (indicator, merchant) pair — an indicator matching forty
+        rows at one merchant is one finding, not forty.
+        """
+        if self.count == 0 or len(df) == 0:
+            return {}
+
+        hits = defaultdict(dict)   # company -> {(indicator_id, kind): hit}
+        companies = df['company_name'].astype(str)
+
+        for itype, columns in INDICATOR_SOURCE_COLUMNS.items():
+            exact_map = self.by_type.get(itype) or {}
+            fuzzy_list = self.fuzzy_by_type.get(itype) or []
+            if not exact_map and not fuzzy_list:
+                continue
+
+            normalizer = INDICATOR_NORMALIZERS[itype]
+            for col in columns:
+                if col not in df.columns:
+                    continue
+                # Normalize the column once, reuse for both tiers.
+                norm_col = df[col].map(lambda v: normalize_indicator_value(itype, v)
+                                       if pd.notna(v) else None)
+
+                if exact_map:
+                    mask = norm_col.isin(exact_map.keys()) & norm_col.notna()
+                    if mask.any():
+                        self._collect_exact(hits, companies, norm_col, mask, exact_map, col)
+
+                if fuzzy_list:
+                    self._collect_fuzzy(hits, companies, norm_col, fuzzy_list, itype, col)
+
+        return {company: list(by_key.values()) for company, by_key in hits.items()}
+
+    def _collect_exact(self, hits, companies, norm_col, mask, exact_map, column):
+        for idx in norm_col.index[mask]:
+            value = norm_col.loc[idx]
+            company = companies.loc[idx]
+            for rec in exact_map.get(value, []):
+                key = (rec['id'], 'exact')
+                if key in hits[company]:
+                    continue
+                hits[company][key] = self._make_hit(rec, 'exact', value, company, column)
+
+    def _collect_fuzzy(self, hits, companies, norm_col, fuzzy_list, itype, column):
+        # Compare against the distinct values in this column, not every row —
+        # a merchant with 5,000 transactions usually has far fewer identities.
+        distinct = [v for v in norm_col.dropna().unique()]
+        if not distinct:
+            return
+        if len(distinct) > NAME_SIMILARITY_MAX_NAMES * 20:
+            distinct = distinct[:NAME_SIMILARITY_MAX_NAMES * 20]
+
+        for rec in fuzzy_list:
+            target = rec['value_norm']
+            for value in distinct:
+                if value == target:
+                    continue        # exact tier already owns this
+                if not _fuzzy_indicator_match(itype, target, value):
+                    continue
+                rows = norm_col.index[norm_col == value]
+                for idx in rows:
+                    company = companies.loc[idx]
+                    key = (rec['id'], 'fuzzy')
+                    if key in hits[company]:
+                        continue
+                    hits[company][key] = self._make_hit(rec, 'fuzzy', value, company, column)
+
+    @staticmethod
+    def _make_hit(rec, kind, matched_value, company, column):
+        origin = rec.get('source_company_name')
+        return {
+            'indicator_id': rec['id'],
+            'indicator_type': rec['indicator_type'],
+            'match_kind': kind,
+            'value_raw': rec['value_raw'],
+            'matched_value': matched_value,
+            'matched_column': column,
+            'source': rec.get('source'),
+            'source_company_name': origin,
+            # The headline case: confirmed at one merchant, seen at another.
+            'cross_merchant': bool(origin) and origin != company,
+            'added_by_email': rec.get('added_by_email'),
+            'added_at': rec.get('added_at'),
+        }
+
+
+def _fuzzy_indicator_match(itype, target, value):
+    """Type-specific idea of 'close enough'. Exact equality is handled by the
+    exact tier and is excluded before this is called."""
+    if itype == 'ip':
+        # Same /24 — same household or small office, not the same device.
+        t, v = target.split('.'), value.split('.')
+        return len(t) == 4 and len(v) == 4 and t[:3] == v[:3]
+
+    if itype == 'email':
+        t_local, _, t_dom = target.partition('@')
+        v_local, _, v_dom = value.partition('@')
+        # Same identity on a new host is the strong case.
+        if t_local == v_local and t_dom != v_dom:
+            return True
+        if t_dom != v_dom:
+            return False
+        return difflib.SequenceMatcher(None, t_local, v_local).ratio() >= INDICATOR_NAME_RATIO
+
+    if itype in ('person_name', 'company_name'):
+        # Cheap blocking key first: sharing no leading character means the
+        # ratio cannot clear the threshold for realistic name lengths.
+        if target[:1] != value[:1] and not (set(target.split()) & set(value.split())):
+            return False
+        return difflib.SequenceMatcher(None, target, value).ratio() >= INDICATOR_NAME_RATIO
+
+    return False
+
+
+def _parse_ts(v):
+    """Tolerant ISO-8601 parse; returns None rather than raising."""
+    if not v:
+        return None
+    try:
+        s = str(v).replace('Z', '+00:00')
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def load_indicators(path):
+    """Read the indicator JSON the API/desktop stages next to the watchlist.
+
+    Accepts either a bare list or {'indicators': [...]} so the file can grow
+    metadata later without breaking older engines.
+    """
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        # An unreadable indicator file must degrade to "no indicators",
+        # never fail the run — the rest of the analysis is still valuable.
+        return []
+    if isinstance(data, dict):
+        return data.get('indicators', [])
+    return data if isinstance(data, list) else []
+
+
+def build_indicator_description_es(hits):
+    """One Spanish sentence summarizing why this merchant was flagged, with
+    enough provenance that a reviewer can trace the match."""
+    if not hits:
+        return ''
+    cross = [h for h in hits if h['cross_merchant']]
+    exact = [h for h in hits if h['match_kind'] == 'exact']
+
+    label = {
+        'card_key': 'tarjeta',
+        'email': 'correo', 'email_domain': 'dominio de correo',
+        'phone': 'teléfono', 'ip': 'IP', 'person_name': 'nombre',
+        'company_name': 'comercio', 'company_id': 'ID de comercio',
+    }
+
+    parts = []
+    if cross:
+        h = cross[0]
+        parts.append(
+            f"Coincide con datos de fraude ya confirmados en otro comercio: "
+            f"{label.get(h['indicator_type'], h['indicator_type'])} "
+            f"«{h['value_raw']}» fue confirmado en «{h['source_company_name']}»"
+        )
+    elif exact:
+        h = exact[0]
+        parts.append(
+            f"Coincide con un indicador de fraude confirmado: "
+            f"{label.get(h['indicator_type'], h['indicator_type'])} «{h['value_raw']}»"
+        )
+    else:
+        h = hits[0]
+        parts.append(
+            f"Coincidencia aproximada con un indicador confirmado: "
+            f"{label.get(h['indicator_type'], h['indicator_type'])} «{h['value_raw']}» "
+            f"≈ «{h['matched_value']}»"
+        )
+
+    src = hits[0].get('source')
+    who = hits[0].get('added_by_email')
+    prov = []
+    if src:
+        prov.append(f"fuente: {src}")
+    if who:
+        prov.append(f"registrado por {who}")
+    if prov:
+        parts.append(f" ({'; '.join(prov)})")
+
+    if len(hits) > 1:
+        parts.append(f". {len(hits)} indicadores coinciden en total")
+    return ''.join(parts) + '.'
+
+
+# ---------------------------------------------------------------------------
 # Risk scoring
 # ---------------------------------------------------------------------------
 
@@ -1373,7 +1986,7 @@ def update_watchlist(wl, critical_findings, date_str):
 # Main analysis pipeline
 # ---------------------------------------------------------------------------
 
-def analyze(csv_path, watchlist_path=None):
+def analyze(csv_path, watchlist_path=None, indicators_path=None):
     # Schema is validated inside load_and_dedupe before any columns get touched.
     df_raw, df_u = load_and_dedupe(csv_path)
 
@@ -1404,6 +2017,13 @@ def analyze(csv_path, watchlist_path=None):
     # specific; threaded through findings and the summary so the frontend
     # and the Spanish action text both render the right ISO code.
     currency = detect_currency(df_u)
+
+    # Confirmed-fraud indicators. Matched once over the whole frame and then
+    # grouped by merchant, so the per-merchant loop below is a dict lookup.
+    # An empty or missing file degrades to "no indicators" rather than
+    # failing the run.
+    indicator_set = FraudIndicatorSet(load_indicators(indicators_path))
+    indicator_hits_by_merchant = indicator_set.match_frame(df_u)
 
     # Test transactions
     suspicious_tests = identify_test_transactions(df_u)
@@ -1504,6 +2124,29 @@ def analyze(csv_path, watchlist_path=None):
             merchant_card_keys=merchant_card_keys,
         )
 
+        # ── Confirmed-fraud indicators ───────────────────────────────────
+        # Applied after score_merchant rather than inside it, because an
+        # exact hit is not a scoring signal — it is analyst-confirmed fact
+        # that outranks the model. Floor rather than assign, so a merchant
+        # that independently scored higher keeps its score.
+        merchant_indicator_hits = indicator_hits_by_merchant.get(mname, [])
+        exact_hits = [h for h in merchant_indicator_hits if h['match_kind'] == 'exact']
+        fuzzy_hits = [h for h in merchant_indicator_hits if h['match_kind'] == 'fuzzy']
+        cross_hits = [h for h in merchant_indicator_hits if h['cross_merchant']]
+
+        if exact_hits:
+            risk_score = max(risk_score, INDICATOR_EXACT_FLOOR)
+            fingerprints.append('confirmed_indicator_exact')
+        if cross_hits:
+            # The case this feature exists for: fraud confirmed at one
+            # merchant reappearing at another. Reported as its own
+            # fingerprint so it can be filtered and counted separately.
+            fingerprints.append('confirmed_indicator_cross_merchant')
+        if fuzzy_hits:
+            fingerprints.append('confirmed_indicator_fuzzy')
+            if ENABLE_FUZZY_INDICATOR_SCORING:
+                risk_score = min(risk_score + W_INDICATOR_FUZZY, 100)
+
         if risk_score < 20:
             continue
 
@@ -1524,6 +2167,12 @@ def analyze(csv_path, watchlist_path=None):
 
         # Evidence: first 5 rows. df_u is already globally time-sorted, so no
         # need to re-sort the per-merchant slice.
+        #
+        # The payer fields (client_name / client_email / ip) are recorded here
+        # to match what the zero-settlement detector already stores. Until
+        # this was levelled up, the two sections wrote different evidence
+        # shapes, which meant a confirmed-fraud indicator could be checked
+        # against the history of one section but not the other.
         evidence_rows = group.head(5)
         evidence = []
         for _, r in evidence_rows.iterrows():
@@ -1531,11 +2180,15 @@ def analyze(csv_path, watchlist_path=None):
                 'transaction_id': r['transaction_id'],
                 'amount': float(r['amount']) if pd.notna(r['amount']) else None,
                 'status': r['status'],
+                'transaction_type': r['transaction_type'] if pd.notna(r['transaction_type']) else None,
                 'rejection_reason': r['rejection_reason'] if pd.notna(r['rejection_reason']) else None,
                 'timestamp': str(r['transaction_created_at']),
                 'card_bin': f"{int(r['bin_card_number']):06d}" if pd.notna(r['bin_card_number']) else None,
                 'card_last_digits': f"{int(r['card_last_digits']):04d}" if pd.notna(r['card_last_digits']) else None,
                 'card_holder': r['card_holder'] if pd.notna(r['card_holder']) else None,
+                'client_name': r['client_name'] if pd.notna(r.get('client_name')) else None,
+                'client_email': r['client_email'] if pd.notna(r.get('client_email')) else None,
+                'ip': r['ip'] if pd.notna(r['ip']) else None,
             })
 
         # Classify as critical or monitor
@@ -1543,6 +2196,10 @@ def analyze(csv_path, watchlist_path=None):
             confidence = 'Critical'
             action_code = decide_action(fingerprints, switches_here, cross_here)
             description = build_description_es(mname, fingerprints, group, watchlist_merchants)
+            # An indicator hit is the most actionable thing a reviewer can be
+            # told, so it leads the description rather than trailing it.
+            if merchant_indicator_hits:
+                description = build_indicator_description_es(merchant_indicator_hits) + ' ' + description
             action_es = build_action_es(action_code, len(ticket_rows), exposure, currency)
             critical_findings.append({
                 'type': classify_finding_type(fingerprints),
@@ -1560,10 +2217,13 @@ def analyze(csv_path, watchlist_path=None):
                 'total_transactions': n_total,
                 'rejected_count': n_rej,
                 'succeeded_count': n_succ,
+                'indicator_hits': merchant_indicator_hits,
             })
         elif risk_score >= 40:
             confidence = 'Monitor'
             description = build_description_es(mname, fingerprints, group, watchlist_merchants)
+            if merchant_indicator_hits:
+                description = build_indicator_description_es(merchant_indicator_hits) + ' ' + description
             monitor_findings.append({
                 'type': classify_finding_type(fingerprints),
                 'company_name': mname,
@@ -1574,6 +2234,7 @@ def analyze(csv_path, watchlist_path=None):
                 'description_es': description,
                 'action_code': 'MONITOR',
                 'evidence_count': n_total,
+                'indicator_hits': merchant_indicator_hits,
             })
 
         # Build flagged_transactions rows for the CSV
@@ -1682,6 +2343,12 @@ def analyze(csv_path, watchlist_path=None):
         'total_high_risk_score_transactions': len(high_risk_score_transactions),
         'total_foreign_card_velocity_merchants': len(foreign_card_bursts),
         'total_suspicious_rejected_merchants': len(suspicious_rejected),
+        'indicators_loaded': len(indicator_set),
+        'total_indicator_merchants': len(indicator_hits_by_merchant),
+        'total_indicator_cross_merchant': len([
+            m for m, hits in indicator_hits_by_merchant.items()
+            if any(h['cross_merchant'] for h in hits)
+        ]),
     }
 
     return {
@@ -1700,6 +2367,23 @@ def analyze(csv_path, watchlist_path=None):
         },
         'flagged_transactions': flagged_txn_rows,
         'high_risk_score_transactions': high_risk_score_transactions,
+        # Flat, merchant-keyed view of every indicator that fired. The API
+        # layer uses this to bump hit_count without re-walking the findings,
+        # and the UI renders it as its own report section. Cross-merchant
+        # hits sort first — they are the reason this feature exists.
+        'indicator_matches': sorted(
+            [
+                {
+                    'company_name': company,
+                    'cross_merchant': any(h['cross_merchant'] for h in hits),
+                    'exact_count': sum(1 for h in hits if h['match_kind'] == 'exact'),
+                    'fuzzy_count': sum(1 for h in hits if h['match_kind'] == 'fuzzy'),
+                    'hits': hits,
+                }
+                for company, hits in indicator_hits_by_merchant.items()
+            ],
+            key=lambda m: (not m['cross_merchant'], -m['exact_count'], m['company_name']),
+        ),
     }
 
 
@@ -1814,6 +2498,9 @@ def main():
     parser.add_argument('--validate-only', action='store_true')
     parser.add_argument('--watchlist')
     parser.add_argument('--update-watchlist')
+    parser.add_argument('--indicators',
+                        help='Path to a confirmed-fraud indicator JSON file '
+                             '(list, or {"indicators": [...]}). Optional.')
     parser.add_argument('--output')
     args = parser.parse_args()
 
@@ -1828,7 +2515,8 @@ def main():
         sys.exit(0 if ok else 1)
 
     wl_path = args.update_watchlist or args.watchlist
-    findings = analyze(args.csv_path, watchlist_path=wl_path)
+    findings = analyze(args.csv_path, watchlist_path=wl_path,
+                       indicators_path=args.indicators)
 
     output_path = args.output or '/tmp/findings.json'
     with open(output_path, 'w') as f:
@@ -1844,6 +2532,10 @@ def main():
     print(f"High-risk-score transactions (>{HIGH_RISK_SCORE_THRESHOLD}): {s['total_high_risk_score_transactions']}")
     print(f"Merchants with foreign-card velocity: {s['total_foreign_card_velocity_merchants']}")
     print(f"Suspicious all-rejected merchants (no settlement): {s['total_suspicious_rejected_merchants']}")
+    if s.get('indicators_loaded'):
+        print(f"Confirmed-fraud indicators loaded: {s['indicators_loaded']}")
+        print(f"Merchants matching an indicator: {s['total_indicator_merchants']}"
+              f" ({s['total_indicator_cross_merchant']} cross-merchant)")
     print(f"Chargeback exposure estimate: {s.get('currency', DEFAULT_CURRENCY)} {s['estimated_chargeback_exposure']:,.2f}")
     print(f"Output written to: {output_path}")
 

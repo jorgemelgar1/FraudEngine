@@ -1,7 +1,7 @@
 import { signOut } from '../lib/auth';
 import type { UpdateState } from '../lib/updater';
 
-export type View = 'analyzer' | 'pendientes' | 'historial';
+export type View = 'analyzer' | 'pendientes' | 'historial' | 'indicadores';
 
 export function Header({
   view, setView, email, pendingCount,
@@ -42,6 +42,9 @@ export function Header({
         </NavButton>
         <NavButton active={view === 'historial'} onClick={() => setView('historial')}>
           Historial
+        </NavButton>
+        <NavButton active={view === 'indicadores'} onClick={() => setView('indicadores')}>
+          Indicadores
         </NavButton>
       </nav>
 

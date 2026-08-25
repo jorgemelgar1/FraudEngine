@@ -27,7 +27,8 @@ report. Watchlist persists across runs in Supabase. CSV data is never stored.
 │   ├── 0004_findings_review.sql ← Human-in-the-loop watchlist review
 │   ├── 0005_desktop_inserts.sql ← RLS insert policies for the desktop app
 │   ├── 0006_review_rpcs_security_definer.sql ← Let the desktop call review RPCs
-│   └── 0007_zero_settlement_persistence.sql  ← Persist the card-testing section
+│   ├── 0007_zero_settlement_persistence.sql  ← Persist the card-testing section
+│   └── 0008_fraud_indicators.sql ← Confirmed-fraud indicator list (stores PII)
 ├── package.json            ← Next.js dependencies
 ├── requirements.txt        ← Python dependencies for the serverless function
 ├── next.config.mjs         ← Next.js build config
@@ -94,7 +95,13 @@ You'll do this once. The order matters.
    **Run this before deploying the persistence change**, otherwise
    `/api/analyze` will fail with a "column does not exist" error from
    PostgREST on the first upload.
-10. All scripts are idempotent so you can re-run safely if anything fails.
+10. Repeat for `supabase/migrations/0008_fraud_indicators.sql` (adds the
+    `fraud_indicators` table the team writes confirmed-fraud values into,
+    plus the RPCs that record hits and deactivate entries). **Read its
+    header first — this is the migration that starts storing personal
+    data.** Run it before deploying the indicator code, otherwise
+    `/api/indicators` fails and `/api/analyze` cannot load the list.
+11. All scripts are idempotent so you can re-run safely if anything fails.
 
 ### 3. Configure Supabase Auth (Google OAuth via Cubo Workspace)
 
@@ -219,7 +226,41 @@ gh repo create cubo-fraud-engine --private --source=. --push
 | Logs | The function never logs CSV contents — only summary counts |
 | Who can sign in | Restricted to `@cubopago.com` emails (set via `ALLOWED_EMAIL_DOMAIN`) |
 | Session security | Supabase Auth handles tokens, refresh, and expiry |
-| Watchlist | The only persistent data — merchant names, card BIN+last4, risk scores. No transactions, no client info |
+| Watchlist | Merchant names, card BIN+last4, risk scores. Populated only by accepting a finding |
+| Fraud indicators | **Personal data, entered deliberately by the team.** See below |
+
+### What the fraud-indicator list stores
+
+Migration 0008 added `fraud_indicators` — values the team has confirmed are
+linked to fraud and wants the engine to watch for. Depending on what is
+entered, this can include **payer emails, phone numbers, cardholder and payer
+names, and IP addresses**.
+
+This is a deliberate expansion of what the system keeps. Before that feature,
+the only persistent data was merchant names, card BIN+last4, and risk scores —
+no client information at all. That is no longer accurate, and the table above
+reflects the current state.
+
+What has not changed:
+
+- **Transaction data is still never stored.** CSVs live in `/tmp` for the
+  duration of one request and are wiped when the function returns.
+- Indicators are written by a person, one value at a time or by paste. Nothing
+  is harvested automatically from an analyzed file.
+- Entries are **deactivated, never deleted**, so there is always a record of
+  what the engine was matching against and who added it.
+- Every row records who added it, when, and from which source (chargeback,
+  bank report, ops review).
+
+Two things the team should decide and write down:
+
+- **Retention.** IP addresses default to a 90-day expiry because they change
+  hands; names and cards do not expire. Whether that is the right rule is a
+  policy call, not a technical one.
+- **Who may add entries.** Today any authenticated `@cubopago.com` user can.
+  An over-broad entry affects every future run, which is why the UI refuses
+  public email domains, single-word names, and reserved IPs, and shows a
+  preview before saving.
 
 ---
 

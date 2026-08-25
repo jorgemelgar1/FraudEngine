@@ -11,33 +11,46 @@ use tauri_plugin_shell::process::CommandEvent;
 /// concatenated; we parse the full payload at the end so we don't lose
 /// data even if Python writes the JSON across multiple flushes.
 ///
-/// `watchlist_json` (optional): if provided, written to a tempfile and
-/// passed to the sidecar via `--watchlist`. The sidecar reads it the same
-/// way analyze.py expects in CLI mode. The tempfile is cleaned up after
-/// the sidecar exits regardless of success.
+/// `watchlist_json` / `indicators_json` (both optional): if provided, each is
+/// written to a tempfile and passed to the sidecar via `--watchlist` /
+/// `--indicators`. The sidecar reads them the same way analyze.py expects in
+/// CLI mode. Both tempfiles are cleaned up after the sidecar exits regardless
+/// of success — they hold watchlist fingerprints and confirmed-fraud personal
+/// data respectively, and neither should linger on disk.
 #[tauri::command]
 async fn analyze_csv(
     app: tauri::AppHandle,
     csv_path: String,
     watchlist_json: Option<String>,
+    indicators_json: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    // Stage the watchlist into a tempfile if the JS side gave us one.
-    // PID is unique-enough since the desktop app runs as a single process
-    // and we delete the tempfile right after the sidecar finishes.
-    let watchlist_path: Option<std::path::PathBuf> = if let Some(wl) = watchlist_json {
-        let tmp = std::env::temp_dir()
-            .join(format!("cubo-watchlist-{}.json", std::process::id()));
-        std::fs::write(&tmp, wl)
-            .map_err(|e| format!("Failed to write watchlist tempfile: {e}"))?;
-        Some(tmp)
-    } else {
-        None
-    };
+    // Stage each payload into a tempfile if the JS side gave us one. PID is
+    // unique-enough since the desktop app runs as a single process and we
+    // delete the tempfiles right after the sidecar finishes.
+    fn stage(name: &str, contents: Option<String>) -> Result<Option<std::path::PathBuf>, String> {
+        match contents {
+            Some(body) => {
+                let tmp = std::env::temp_dir()
+                    .join(format!("cubo-{}-{}.json", name, std::process::id()));
+                std::fs::write(&tmp, body)
+                    .map_err(|e| format!("Failed to write {name} tempfile: {e}"))?;
+                Ok(Some(tmp))
+            }
+            None => Ok(None),
+        }
+    }
+
+    let watchlist_path = stage("watchlist", watchlist_json)?;
+    let indicators_path = stage("indicators", indicators_json)?;
 
     let mut args: Vec<String> = vec![csv_path.clone()];
     if let Some(wl) = &watchlist_path {
         args.push("--watchlist".to_string());
         args.push(wl.to_string_lossy().to_string());
+    }
+    if let Some(ind) = &indicators_path {
+        args.push("--indicators".to_string());
+        args.push(ind.to_string_lossy().to_string());
     }
 
     let sidecar = app
@@ -63,11 +76,11 @@ async fn analyze_csv(
         }
     }
 
-    // Always remove the tempfile even on failure — it can contain a snapshot
-    // of the watchlist (cardholder fingerprints etc.) that we don't want
-    // lingering on disk.
-    if let Some(wl) = watchlist_path {
-        let _ = std::fs::remove_file(wl);
+    // Always remove the tempfiles even on failure — they hold a watchlist
+    // snapshot (cardholder fingerprints) and confirmed-fraud personal data
+    // that we don't want lingering on disk.
+    for path in [watchlist_path, indicators_path].into_iter().flatten() {
+        let _ = std::fs::remove_file(path);
     }
 
     let stdout_str = String::from_utf8_lossy(&stdout_buf);

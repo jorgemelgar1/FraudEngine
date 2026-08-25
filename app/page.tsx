@@ -82,6 +82,31 @@ type SuspiciousRejectedMerchant = {
   finding_id?: string;
 };
 
+// A confirmed-fraud indicator that fired during this run. `cross_merchant`
+// is the headline case: the value was confirmed at one merchant and has now
+// appeared at a different one.
+type IndicatorHit = {
+  indicator_id: string;
+  indicator_type: string;
+  match_kind: 'exact' | 'fuzzy';
+  value_raw: string;
+  matched_value: string;
+  matched_column: string;
+  source: string | null;
+  source_company_name: string | null;
+  cross_merchant: boolean;
+  added_by_email: string | null;
+  added_at: string | null;
+};
+
+type IndicatorMatch = {
+  company_name: string;
+  cross_merchant: boolean;
+  exact_count: number;
+  fuzzy_count: number;
+  hits: IndicatorHit[];
+};
+
 type Findings = {
   run_id?: string;
   summary: {
@@ -100,12 +125,17 @@ type Findings = {
     total_foreign_card_velocity_merchants: number;
     total_suspicious_rejected_merchants?: number;  // optional: older reports
                                                     // predate this section.
+    indicators_loaded?: number;
+    total_indicator_merchants?: number;
+    total_indicator_cross_merchant?: number;
   };
   critical_findings: CriticalFinding[];
   monitor_findings: MonitorFinding[];
   // Optional for backward compatibility with reports generated before the
   // suspicious-rejected-merchant section shipped.
   suspicious_rejected_merchants?: SuspiciousRejectedMerchant[];
+  // Optional: reports generated before the indicator feature shipped.
+  indicator_matches?: IndicatorMatch[];
 };
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4 MB — keep under Vercel's 4.5 MB request-body limit.
@@ -340,6 +370,7 @@ export default function HomePage() {
             Pendientes{pendingCount && pendingCount > 0 ? ` (${pendingCount})` : ''}
           </Link>
           <Link href="/historial" className="signout">Historial</Link>
+          <Link href="/indicadores" className="signout">Indicadores</Link>
           <button
             className="signout"
             onClick={signOut}
@@ -488,6 +519,10 @@ export default function HomePage() {
                   label="Sin liquidación"
                   value={fmtNumber(results.summary.total_suspicious_rejected_merchants ?? 0)}
                 />
+                <Kpi
+                  label="Fraude confirmado"
+                  value={fmtNumber(results.summary.total_indicator_merchants ?? 0)}
+                />
               </div>
             </div>
 
@@ -562,6 +597,62 @@ export default function HomePage() {
               </div>
             )}
 
+            {(results.indicator_matches?.length ?? 0) > 0 && (
+              <div className="card">
+                <h3 style={{ marginTop: 0 }}>Coincidencias con fraude confirmado</h3>
+                <p className="muted" style={{ marginTop: 0, fontSize: '0.9rem' }}>
+                  Datos que el equipo ya había confirmado como fraude y que aparecen en
+                  este archivo. Las coincidencias en un comercio distinto al original
+                  van primero: son la señal de que el fraude se está moviendo entre
+                  comercios.
+                </p>
+                {results.indicator_matches!.map((m, i) => (
+                  <div className={`finding ${m.cross_merchant ? '' : 'monitor'}`} key={i}>
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                      flexWrap: 'wrap',
+                      gap: '0.5rem',
+                    }}>
+                      <div style={{ flex: '1 1 auto' }}>
+                        <strong>{m.company_name}</strong>
+                        <span className="muted" style={{ marginLeft: '0.75rem' }}>
+                          {m.exact_count} exacta{m.exact_count === 1 ? '' : 's'}
+                          {m.fuzzy_count > 0 && ` · ${m.fuzzy_count} aproximada${m.fuzzy_count === 1 ? '' : 's'}`}
+                        </span>
+                      </div>
+                      {m.cross_merchant && (
+                        <span
+                          className="tag"
+                          style={{ background: 'rgba(255, 107, 53, 0.15)', color: 'var(--cubo-orange)' }}
+                        >
+                          Otro comercio
+                        </span>
+                      )}
+                    </div>
+                    <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.2rem', fontSize: '0.88rem' }}>
+                      {m.hits.map((h, j) => (
+                        <li key={j}>
+                          <strong>{h.value_raw}</strong>
+                          {' '}<span className="muted">({h.indicator_type}</span>
+                          {h.match_kind === 'fuzzy' && <span className="muted">, aproximada → «{h.matched_value}»</span>}
+                          <span className="muted">)</span>
+                          {h.source_company_name && (
+                            <span className="muted">
+                              {' '}· confirmado en <strong>{h.source_company_name}</strong>
+                            </span>
+                          )}
+                          {h.source && <span className="muted"> · {h.source}</span>}
+                          {h.added_by_email && <span className="muted"> · {h.added_by_email}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {(results.suspicious_rejected_merchants?.length ?? 0) > 0 && (
               <div className="card">
                 <h3 style={{ marginTop: 0 }}>Comercios sin transacciones exitosas</h3>
@@ -595,7 +686,8 @@ export default function HomePage() {
 
             {results.critical_findings.length === 0 &&
               results.monitor_findings.length === 0 &&
-              (results.suspicious_rejected_merchants?.length ?? 0) === 0 && (
+              (results.suspicious_rejected_merchants?.length ?? 0) === 0 &&
+              (results.indicator_matches?.length ?? 0) === 0 && (
               <div className="card">
                 <p className="success" style={{ margin: 0 }}>
                   No se detectó actividad sospechosa en este CSV.

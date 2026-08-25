@@ -6,6 +6,7 @@ import type { Session } from '@supabase/supabase-js';
 
 import { loadWatchlistWithCache } from '../lib/watchlist';
 import { syncOrQueue, type SyncResult } from '../lib/sync';
+import { fetchActiveIndicators, recordIndicatorHits } from '../lib/indicators';
 
 type Findings = {
   summary?: {
@@ -15,6 +16,9 @@ type Findings = {
     total_critical_findings?: number;
     total_monitor_findings?: number;
     total_suspicious_rejected_merchants?: number;
+    indicators_loaded?: number;
+    total_indicator_merchants?: number;
+    total_indicator_cross_merchant?: number;
     estimated_chargeback_exposure?: number;
     currency?: string;
   };
@@ -47,6 +51,25 @@ type Findings = {
       distinct_ips: number;
       rejected_amount: number;
     };
+  }>;
+  // Confirmed-fraud indicators that fired. Optional: reports produced by a
+  // sidecar built before this feature shipped won't have the key.
+  indicator_matches?: Array<{
+    company_name: string;
+    cross_merchant: boolean;
+    exact_count: number;
+    fuzzy_count: number;
+    hits: Array<{
+      indicator_id: string;
+      indicator_type: string;
+      match_kind: 'exact' | 'fuzzy';
+      value_raw: string;
+      matched_value: string;
+      source: string | null;
+      source_company_name: string | null;
+      cross_merchant: boolean;
+      added_by_email: string | null;
+    }>;
   }>;
   error?: string;
 };
@@ -140,9 +163,21 @@ export function Analyzer({
         setWatchlistStale(wl.cachedAt);
       }
 
+      // Indicators are fetched fresh, never cached: the list is edited by
+      // hand and a stale copy would mean missing a value a teammate added
+      // minutes ago. Offline, we analyze without them rather than failing —
+      // the rest of the report is still worth having.
+      let indicators: unknown[] = [];
+      try {
+        indicators = await fetchActiveIndicators();
+      } catch {
+        indicators = [];
+      }
+
       const result = await invoke<Findings>('analyze_csv', {
         csvPath: path,
         watchlistJson: JSON.stringify(wl.watchlist),
+        indicatorsJson: JSON.stringify(indicators),
       });
 
       if (result?.error) {
@@ -161,6 +196,12 @@ export function Analyzer({
         setSync({ kind: 'synced', result: out.result });
       } else {
         setSync({ kind: 'queued', queueId: out.queueId });
+      }
+
+      // Bookkeeping only: which indicators fired and where. Deliberately
+      // not awaited into the error path — the report is already on screen.
+      if (result.indicator_matches?.length) {
+        recordIndicatorHits(result.indicator_matches).catch(() => {});
       }
 
       setStatus('done');
@@ -297,6 +338,7 @@ function ReportView({
         <Kpi label="Hallazgos críticos"     value={fmt(s.total_critical_findings)} accent="critical" />
         <Kpi label="Hallazgos a monitorear" value={fmt(s.total_monitor_findings)}  accent="monitor" />
         <Kpi label="Sin liquidación"        value={fmt(s.total_suspicious_rejected_merchants)} accent="monitor" />
+        <Kpi label="Fraude confirmado"      value={fmt(s.total_indicator_merchants)} accent="critical" />
         <Kpi label="Exposición a chargebacks"
              value={fmtCurrency(s.estimated_chargeback_exposure, currency)} />
       </div>
@@ -338,6 +380,51 @@ function ReportView({
                     <span className="tag" key={fp}>{fp}</span>
                   ))}
                 </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {findings.indicator_matches && findings.indicator_matches.length > 0 && (
+        <section>
+          <h3>Coincidencias con fraude confirmado ({findings.indicator_matches.length})</h3>
+          <p className="phase-note">
+            Datos que el equipo ya había confirmado como fraude y que aparecen en
+            este archivo. Las coincidencias en un comercio distinto al original van
+            primero: son la señal de que el fraude se está moviendo entre comercios.
+          </p>
+          <ul className="findings">
+            {findings.indicator_matches.map((m, i) => (
+              <li key={i} className={`finding ${m.cross_merchant ? 'critical' : 'monitor'}`}>
+                <div className="finding-head">
+                  <strong>{m.company_name}</strong>
+                  <span className="score">
+                    {m.exact_count} exacta{m.exact_count === 1 ? '' : 's'}
+                    {m.fuzzy_count > 0 && ` · ${m.fuzzy_count} aprox.`}
+                  </span>
+                </div>
+                {m.cross_merchant && (
+                  <div className="tags">
+                    <span className="tag zero-settlement">Otro comercio</span>
+                  </div>
+                )}
+                <ul className="indicator-hits">
+                  {m.hits.map((h, j) => (
+                    <li key={j}>
+                      <strong className="mono">{h.value_raw}</strong>
+                      <span className="muted small"> ({h.indicator_type}</span>
+                      {h.match_kind === 'fuzzy' && (
+                        <span className="muted small">, aprox. → «{h.matched_value}»</span>
+                      )}
+                      <span className="muted small">)</span>
+                      {h.source_company_name && (
+                        <span className="muted small"> · confirmado en <strong>{h.source_company_name}</strong></span>
+                      )}
+                      {h.source && <span className="muted small"> · {h.source}</span>}
+                    </li>
+                  ))}
+                </ul>
               </li>
             ))}
           </ul>
