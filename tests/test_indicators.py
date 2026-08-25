@@ -347,6 +347,24 @@ def test_missing_indicator_file_degrades_quietly():
     assert analyze.load_indicators('/nonexistent/path.json') == []
 
 
+def test_indicator_file_with_a_bom_still_loads():
+    """A BOM used to raise JSONDecodeError, which the catch turned into zero
+    indicators — a run that checked nothing looked exactly like a run that
+    found nothing. Anything hand-writing this file on Windows emits one."""
+    import json as _json
+    import tempfile
+    fixture_dir = os.path.join(_HERE, 'fixtures')
+    os.makedirs(fixture_dir, exist_ok=True)
+    path = os.path.join(fixture_dir, '_bom_indicators.json')
+    body = _json.dumps([_ind('email', 'malo@x.com')])
+    with open(path, 'w', encoding='utf-8-sig') as fh:   # writes the BOM
+        fh.write(body)
+    try:
+        assert len(analyze.load_indicators(path)) == 1
+    finally:
+        os.remove(path)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failures = 0

@@ -49,6 +49,13 @@ def main() -> int:
     parser.add_argument('--watchlist', default=None,
                         help='Optional path to a watchlist JSON file. Phase 2 '
                              'leaves this empty; Phase 3 wires Supabase.')
+    parser.add_argument('--indicators', default=None,
+                        help='Optional path to a confirmed-fraud indicator '
+                             'JSON file, staged by the Tauri side from '
+                             'Supabase. Every flag the Rust command passes '
+                             'must be declared here — argparse exits 2 on an '
+                             'unrecognized argument, which surfaces to the UI '
+                             'as an unparseable-JSON error.')
     args = parser.parse_args()
 
     print(f'[sidecar] analyzing: {args.csv_path}', file=sys.stderr)
@@ -58,7 +65,11 @@ def main() -> int:
         return 3
 
     try:
-        findings = fraud_engine.analyze(args.csv_path, watchlist_path=args.watchlist)
+        findings = fraud_engine.analyze(
+            args.csv_path,
+            watchlist_path=args.watchlist,
+            indicators_path=args.indicators,
+        )
     except Exception as e:
         # Keep the trace in stderr (so the dev terminal shows it) but send a
         # sanitized one-line error to stdout for the UI.

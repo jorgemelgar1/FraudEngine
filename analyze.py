@@ -1791,14 +1791,25 @@ def load_indicators(path):
     Accepts either a bare list or {'indicators': [...]} so the file can grow
     metadata later without breaking older engines.
     """
-    if not path or not os.path.exists(path):
+    if not path:
+        return []
+    if not os.path.exists(path):
+        print(f'[indicators] file not found: {path}', file=sys.stderr)
         return []
     try:
-        with open(path, encoding='utf-8') as f:
+        # utf-8-sig, not utf-8: a BOM would otherwise raise JSONDecodeError
+        # and silently degrade the run to zero indicators. Anything that
+        # hand-writes this file on Windows (PowerShell's Set-Content
+        # -Encoding utf8 among them) emits one.
+        with open(path, encoding='utf-8-sig') as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
         # An unreadable indicator file must degrade to "no indicators",
         # never fail the run — the rest of the analysis is still valuable.
+        # But say so on stderr: a report that quietly checked nothing looks
+        # exactly like a report that found nothing.
+        print(f'[indicators] could not read {path}: {type(e).__name__}',
+              file=sys.stderr)
         return []
     if isinstance(data, dict):
         return data.get('indicators', [])
