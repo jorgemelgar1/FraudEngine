@@ -90,7 +90,7 @@ from a merchant before it will look — a realistic chance to accumulate them.
 invisible to a two-day window. If that pattern matters, add a separate weekly
 sweep with a 7-day window; it is the same runner with different arguments.
 
-**Settled (2026-09-11):** the CMS interprets those dates in **each country's
+**Settled (2026-09-09):** the CMS interprets those dates in **each country's
 own timezone** — midnight-to-midnight is real local midnight. The Pi is set to
 Panama time, which is therefore load-bearing rather than cosmetic; SV and GT sit
 one hour further west, well inside this window's slack.
