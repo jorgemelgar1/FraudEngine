@@ -141,22 +141,41 @@ def test_env_and_its_backup_stay_gitignored():
     assert os.path.exists(os.path.join(_ROOT, 'runner', '.env.example'))
 
 
-def test_written_env_contains_the_pattern_but_not_the_sample_link():
-    """The report link is a credential - possession of it is authorisation to
-    download a full transaction export. It is used to derive a shape and must
-    not survive that."""
+def _values(pattern, **overrides):
+    base = {
+        'NEXT_PUBLIC_SUPABASE_URL': 'https://abc.supabase.co',
+        'SUPABASE_SERVICE_ROLE_KEY': 'sb_secret_xyz',
+        'RUNNER_EMAIL': 'runner@example.com',
+        'CUBO_REPORT_SENDER': 'reports@example.internal',
+        'CUBO_REPORT_LABEL': '',
+        'CUBO_CSV_URL_PATTERN': pattern,
+        'RUNNER_LOOKBACK_DAYS': '1',
+    }
+    base.update(overrides)
+    return base
+
+
+def _write_to_temp(values, existing=None):
+    """Run write_env against a throwaway path. Returns (contents, carried)."""
     import tempfile
 
-    pattern, _ = setup_env.pattern_from_link(LINK)
     original = setup_env.ENV_PATH
     tmpdir = tempfile.mkdtemp(prefix='setup-env-test-')
     setup_env.ENV_PATH = os.path.join(tmpdir, '.env')
     try:
-        setup_env.write_env('https://abc.supabase.co', 'sb_secret_xyz',
-                            'runner@example.com', pattern)
-        written = open(setup_env.ENV_PATH, encoding='utf-8').read()
+        carried = setup_env.write_env(values, existing)
+        with open(setup_env.ENV_PATH, encoding='utf-8') as fh:
+            return fh.read(), carried
     finally:
         setup_env.ENV_PATH = original
+
+
+def test_written_env_contains_the_pattern_but_not_the_sample_link():
+    """The report link is a credential - possession of it is authorisation to
+    download a full transaction export. It is used to derive a shape and must
+    not survive that."""
+    pattern, _ = setup_env.pattern_from_link(LINK)
+    written, _carried = _write_to_temp(_values(pattern))
 
     assert LINK not in written, 'the raw report link was written to disk'
     assert '8943090c' not in written, 'the report id was written to disk'
@@ -188,13 +207,80 @@ def test_written_env_is_not_world_readable():
     tmpdir = tempfile.mkdtemp(prefix='setup-env-perm-')
     setup_env.ENV_PATH = os.path.join(tmpdir, '.env')
     try:
-        setup_env.write_env('https://a.supabase.co', 'sb_secret_x',
-                            'r@example.com', 'https://x/y\\.csv')
+        setup_env.write_env(_values(r'https://x/y\.csv'))
         mode = stat.S_IMODE(os.stat(setup_env.ENV_PATH).st_mode)
     finally:
         setup_env.ENV_PATH = original
 
     assert mode == 0o600, f'expected 0600, got {oct(mode)}'
+
+
+# ── Re-running setup ─────────────────────────────────────────────────────────
+
+def test_values_this_script_does_not_manage_survive_a_rewrite():
+    """GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET are added by hand AFTER setup
+    runs. Dropping them on a re-run would break gmail.py with nothing at all
+    pointing back at setup as the cause."""
+    pattern, _ = setup_env.pattern_from_link(LINK)
+    existing = {
+        'NEXT_PUBLIC_SUPABASE_URL': 'https://old.supabase.co',
+        'GMAIL_CLIENT_ID': 'abc.apps.googleusercontent.com',
+        'GMAIL_CLIENT_SECRET': 'a-secret',
+        'CUBO_API_ROOT': 'https://api.example.internal',
+    }
+    written, carried = _write_to_temp(_values(pattern), existing)
+
+    assert 'GMAIL_CLIENT_ID=abc.apps.googleusercontent.com' in written
+    assert 'GMAIL_CLIENT_SECRET=a-secret' in written
+    assert 'CUBO_API_ROOT=https://api.example.internal' in written
+    assert carried == ['CUBO_API_ROOT', 'GMAIL_CLIENT_ID', 'GMAIL_CLIENT_SECRET']
+
+    # ...but a managed key is replaced, not duplicated.
+    assert written.count('NEXT_PUBLIC_SUPABASE_URL=') == 1
+    assert 'https://old.supabase.co' not in written
+
+
+def test_report_sender_is_written():
+    """Its absence is what made `gmail.py --check` fail after the Gmail work
+    landed: setup predated it and never asked."""
+    pattern, _ = setup_env.pattern_from_link(LINK)
+    written, _ = _write_to_temp(_values(pattern))
+    assert 'CUBO_REPORT_SENDER=reports@example.internal' in written
+
+
+def test_blank_label_is_written_blank():
+    """A label that does not exist in Gmail matches nothing, and the only
+    symptom is zero emails found. Blank means 'search by sender', which
+    always works."""
+    pattern, _ = setup_env.pattern_from_link(LINK)
+    written, _ = _write_to_temp(_values(pattern))
+    assert 'CUBO_REPORT_LABEL=\n' in written
+
+
+def test_existing_env_is_parsed_back():
+    import tempfile
+
+    original = setup_env.ENV_PATH
+    tmpdir = tempfile.mkdtemp(prefix='setup-env-read-')
+    setup_env.ENV_PATH = os.path.join(tmpdir, '.env')
+    try:
+        with open(setup_env.ENV_PATH, 'w', encoding='utf-8') as fh:
+            fh.write('# a comment\n\nA=1\nB="two"\nC=\nbroken line\n')
+        values = setup_env.read_existing_env()
+    finally:
+        setup_env.ENV_PATH = original
+
+    assert values['A'] == '1'
+    assert values['B'] == 'two', 'quotes must be stripped, as config.py does'
+    assert values['C'] == ''
+    assert 'broken line' not in values
+
+
+def test_label_has_no_default_in_config():
+    """A default naming a label the user never created makes every search
+    match nothing."""
+    import config
+    assert config.REPORT_LABEL == '' or os.environ.get('CUBO_REPORT_LABEL')
 
 
 # ── Runner ───────────────────────────────────────────────────────────────────

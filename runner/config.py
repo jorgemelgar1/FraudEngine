@@ -103,7 +103,12 @@ REPORT_SUBJECT = _env('CUBO_REPORT_SUBJECT')
 
 # Gmail label the report mail is filtered into, so the runner polls a small
 # labelled set instead of searching the whole mailbox.
-REPORT_LABEL = _env('CUBO_REPORT_LABEL', 'cubo-reports')
+# Optional, and deliberately WITHOUT a default. A label narrows the search to
+# a small set instead of the whole mailbox, which is nice - but a default
+# naming a label the user has not created makes every search match nothing,
+# and "0 correos encontrados" gives no hint that a label is the reason. Empty
+# means "search by sender across the mailbox", which always works.
+REPORT_LABEL = _env('CUBO_REPORT_LABEL')
 
 # Regex matching the CSV link in the email body. The link is UNAUTHENTICATED:
 # anyone holding the URL can download a full transaction export, which is why
