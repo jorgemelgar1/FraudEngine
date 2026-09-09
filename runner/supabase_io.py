@@ -263,3 +263,92 @@ def record_indicator_hits(findings: dict):
             # are confirmed-fraud personal data.
             print(f'  [indicadores] no se registraron los hits: {type(e).__name__}')
             return
+
+
+# ── Runner cycle bookkeeping ─────────────────────────────────────────────────
+# One row per scheduled cycle, whatever the outcome (migration 0012). This is
+# what lets the app tell a silently-broken runner apart from a quiet fraud
+# week without anyone SSH-ing into the Pi.
+#
+# Every function here is BEST-EFFORT and returns rather than raises, which is
+# the opposite of the rest of this module. The reason is narrow: these writes
+# are bookkeeping ABOUT a cycle, so letting one fail the cycle it is
+# describing would be perverse - and worse, a health-recording failure would
+# then masquerade as the failure it was trying to record. Same reasoning as
+# touch_watchlist_merchant and record_indicator_hits above.
+#
+# The cost is a real blind spot, stated plainly: if Supabase is unreachable we
+# cannot record "Supabase is unreachable". The cycle still shows as a gap in
+# the timeline, which is the honest representation of "we do not know".
+
+def cycle_start(country_code: str, window_start=None, window_end=None,
+                token_expires_at=None, host: str = None):
+    """Open a cycle row and return its id, or None if it could not be written.
+
+    Written BEFORE the work starts, so a cycle that dies mid-flight leaves a
+    row stuck in 'running'. That is deliberately distinguishable from no row
+    at all: one means the process was killed or the Pi lost power, the other
+    means cron never fired, and the fixes have nothing in common.
+    """
+    payload = {
+        'country_code':     country_code,
+        'outcome':          'running',
+        'window_start':     window_start,
+        'window_end':       window_end,
+        'token_expires_at': token_expires_at,
+        'host':             host,
+    }
+    try:
+        res = sb_rest('POST', 'runner_cycles', body=payload,
+                      prefer='return=representation')
+    except SupabaseError as e:
+        print(f'  [ciclo] no se pudo registrar el inicio: {e}')
+        return None
+    if not res:
+        return None
+    return res[0].get('id')
+
+
+def cycle_finish(cycle_id: str, outcome: str, detail: str = None):
+    """Close a cycle row with its outcome.
+
+    A failure here is worth a loud warning rather than silence: the row stays
+    'running', and the dashboard will report a cycle that died mid-flight when
+    in fact it finished cleanly. A wrong alarm is better than a missing one,
+    but only if the log says which happened.
+    """
+    if not cycle_id:
+        return False
+    try:
+        # An RPC rather than a PATCH so `finished_at` comes from the database
+        # clock, the same one that stamped started_at. Sending the Pi's own
+        # timestamp instead would let clock skew produce a negative duration,
+        # which reads as a bug in the dashboard rather than as drift here.
+        sb_rpc('finish_runner_cycle', {
+            'p_id':      cycle_id,
+            'p_outcome': outcome,
+            'p_detail':  (detail or None),
+        })
+        return True
+    except SupabaseError as e:
+        print(f'  [ciclo] AVISO: el ciclo terminó como {outcome} pero no se '
+              f'pudo registrar, así que quedará como "en curso": {e}')
+        return False
+
+
+def cycle_attach_run(cycle_id: str, run_id: str):
+    """Point a cycle row at the analysis_runs row it produced.
+
+    Called as soon as the run exists rather than at the end of the cycle, so
+    that a cycle which analyses successfully and then fails while syncing
+    still shows which run it created.
+    """
+    if not cycle_id or not run_id:
+        return False
+    try:
+        sb_rest('PATCH', f'runner_cycles?id=eq.{cycle_id}',
+                body={'run_id': run_id})
+        return True
+    except SupabaseError as e:
+        print(f'  [ciclo] no se pudo enlazar el run {run_id}: {e}')
+        return False

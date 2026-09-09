@@ -208,6 +208,17 @@ GROUPS = {
 }
 
 
+class ConfigError(RuntimeError):
+    """Something is missing from runner/.env.
+
+    A subclass of RuntimeError so that every existing caller keeps catching
+    it unchanged. It exists only so the scheduled cycle can record WHICH kind
+    of failure happened (migration 0012) - "the .env is incomplete" and "the
+    CMS refused us" need different responses, and both used to arrive as a
+    bare RuntimeError that nothing could tell apart.
+    """
+
+
 def validate(*groups: str):
     """Raise with a readable list of what is missing, rather than failing
     later with a request to an empty URL.
@@ -224,7 +235,7 @@ def validate(*groups: str):
             raise ValueError(f'Unknown config group {group!r}')
         missing += [name for name, value in GROUPS[group] if not value]
     if missing:
-        raise RuntimeError(
+        raise ConfigError(
             'Missing configuration: ' + ', '.join(missing) + '\n'
             'Copy runner/.env.example to runner/.env and fill it in. '
             'Real values are deliberately absent from this repository.'

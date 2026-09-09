@@ -222,13 +222,17 @@ def test_timeout_ends_the_job_without_asking_again():
     """The central scheduling rule. A second request would queue a duplicate
     report and a duplicate email, and since every report mail is identical
     there would be no way to tell which answered which."""
+    raised = None
     with _Token(_jwt(30)), _Cms() as cms, _Mail(None) as mail:
-        code, output = _capture(lambda: cycle.run_cycle('GT'))
+        try:
+            _capture(lambda: cycle.run_cycle('GT'))
+        except cycle.NoReportEmail as e:
+            raised = e
 
     assert cms.triggers == [(3, *cubo_api.date_window())], 'exactly one request'
     assert mail.calls == 1
-    assert code == 0, 'a slow report is not a failure worth alerting on'
-    assert 'próximo turno' in output
+    assert raised is not None, 'giving up must be signalled, not silent'
+    assert 'próximo turno' in str(raised)
 
 
 def test_a_found_report_is_downloaded_and_processed():
@@ -239,9 +243,11 @@ def test_a_found_report_is_downloaded_and_processed():
     import run as runner
     orig_download, orig_process = runner._download, runner.process
     runner._download = lambda url: '/tmp/fake.csv'
-    runner.process = lambda source, dry_run=False, run_source='auto': (
-        processed.update(path=source.path, message_id=source.message_id,
-                         run_source=run_source, delete=source.delete_after))
+    runner.process = (
+        lambda source, dry_run=False, run_source='auto', cycle_id=None: (
+            processed.update(path=source.path, message_id=source.message_id,
+                             run_source=run_source, cycle_id=cycle_id,
+                             delete=source.delete_after)))
     try:
         with _Token(_jwt(30)), _Cms() as cms, \
                 _Mail(('msg-7', link, datetime.now(timezone.utc))):
@@ -349,6 +355,251 @@ def test_health_flags_only_the_stale_country():
     assert code == 1
     assert 'ATRASADO: PA' in output
     assert 'ATRASADO: GT' not in output and 'ATRASADO: SV' not in output
+
+
+# ── The cycle record (migration 0012) ────────────────────────────────────────
+# What the app reads. The point of these is that EVERY ending of a cycle -
+# including the ones that are not errors and the ones that exit 0 - leaves a
+# row saying which ending it was. Without that, "the Pi is off", "cron is not
+# firing" and "every cycle fails" are all the same silence.
+
+class _Cycles:
+    """Records what would have been written to runner_cycles."""
+
+    def __init__(self, start_id='cyc-1'):
+        self.start_id = start_id
+        self.started = []
+        self.finished = []
+        self.attached = []
+
+    def __enter__(self):
+        import supabase_io
+        self._mod = supabase_io
+        self._saved = (supabase_io.cycle_start, supabase_io.cycle_finish,
+                       supabase_io.cycle_attach_run)
+        supabase_io.cycle_start = self._start
+        supabase_io.cycle_finish = self._finish
+        supabase_io.cycle_attach_run = self._attach
+        return self
+
+    def __exit__(self, *exc):
+        (self._mod.cycle_start, self._mod.cycle_finish,
+         self._mod.cycle_attach_run) = self._saved
+
+    def _start(self, country_code, window_start=None, window_end=None,
+               token_expires_at=None, host=None):
+        self.started.append({'country_code': country_code,
+                             'window_start': window_start,
+                             'window_end': window_end,
+                             'token_expires_at': token_expires_at,
+                             'host': host})
+        return self.start_id
+
+    def _finish(self, cycle_id, outcome, detail=None):
+        self.finished.append((cycle_id, outcome, detail))
+        return True
+
+    def _attach(self, cycle_id, run_id):
+        self.attached.append((cycle_id, run_id))
+        return True
+
+
+class _AllConfigValid:
+    """config snapshots the environment at import, and the test env has no
+    real Supabase credentials. Stubbing validate is what lets main() be
+    exercised at all; `only_group` reproduces a partially-filled .env."""
+
+    def __init__(self, only_group=None):
+        self.only_group = only_group
+        self.calls = []
+
+    def __enter__(self):
+        self._saved = config.validate
+        config.validate = self._fake
+        return self
+
+    def __exit__(self, *exc):
+        config.validate = self._saved
+
+    def _fake(self, *groups):
+        self.calls.append(groups)
+        if self.only_group and set(groups) != {self.only_group}:
+            raise config.ConfigError('Missing configuration: CUBO_ORIGIN')
+
+
+def test_a_slow_report_exits_zero_but_is_recorded_as_no_email():
+    """Both halves matter and they pull in opposite directions. cron must see
+    exit 0 (a slow report is not worth an alert), and the dashboard must NOT
+    see a success (nothing was analyzed). Recording only on completion, or
+    treating exit 0 as 'ok', loses one or the other."""
+    with _Cycles() as cyc, _AllConfigValid(), _Token(_jwt(30)), \
+            _Cms(), _Mail(None):
+        code, _ = _capture(lambda: cycle.main([]))
+
+    assert code == 0, 'cron must stay quiet about a slow report'
+    assert len(cyc.started) == 1, 'the attempt is recorded before it is made'
+    assert [f[1] for f in cyc.finished] == ['no_email']
+    assert 'próximo turno' in cyc.finished[0][2]
+
+
+def test_an_expired_token_is_recorded_as_token_error():
+    """The most likely scheduled failure this system has - the token lasts 90
+    days - and the one whose symptom (zero findings) is identical to a quiet
+    fraud day."""
+    with _Cycles() as cyc, _AllConfigValid(), _Token(_jwt(-1)), _Cms():
+        code, _ = _capture(lambda: cycle.main([]))
+
+    assert code == 1
+    assert [f[1] for f in cyc.finished] == ['token_error']
+    assert 'caducó' in cyc.finished[0][2]
+
+
+def test_an_incomplete_env_is_still_recorded():
+    """Supabase is validated on its own first, precisely so that a missing
+    CMS value still produces a row. Validating everything up front would make
+    the easiest failure to fix the only one invisible in the app."""
+    with _Cycles() as cyc, _AllConfigValid(only_group='supabase') as cfg:
+        code, _ = _capture(lambda: cycle.main([]))
+
+    assert code == 1
+    assert cfg.calls[0] == ('supabase',), 'Supabase must be checked alone first'
+    assert len(cyc.started) == 1, 'the row exists even though .env is broken'
+    assert [f[1] for f in cyc.finished] == ['config_error']
+
+
+def test_a_dry_run_records_no_cycle():
+    """A dry run does nothing on purpose. A row for it would be a success on
+    the dashboard for a slot that never asked for anything."""
+    with _Cycles() as cyc, _AllConfigValid(), _Cms():
+        code, _ = _capture(lambda: cycle.main(['--dry-run']))
+
+    assert code == 0
+    assert cyc.started == [], 'a dry run must not claim the runner ran'
+    assert cyc.finished == []
+
+
+def test_a_successful_cycle_records_ok_and_links_its_run():
+    link = ('https://cdn.example.internal/reports/csv/'
+            '8943090c-1111-2222-3333-444455556666.csv')
+    import run as runner
+    import supabase_io
+    orig_download, orig_process = runner._download, runner.process
+
+    def fake_process(source, dry_run=False, run_source='auto', cycle_id=None):
+        # Stands in for the real pipeline, which links the run as soon as the
+        # analysis_runs row exists.
+        supabase_io.cycle_attach_run(cycle_id, 'run-42')
+        return {}
+
+    runner._download = lambda url: '/tmp/fake.csv'
+    runner.process = fake_process
+    try:
+        with _Cycles() as cyc, _AllConfigValid(), _Token(_jwt(30)), _Cms(), \
+                _Mail(('msg-9', link, datetime.now(timezone.utc))):
+            code, _ = _capture(lambda: cycle.main([]))
+    finally:
+        runner._download, runner.process = orig_download, orig_process
+
+    assert code == 0
+    assert [f[1] for f in cyc.finished] == ['ok']
+    assert cyc.attached == [('cyc-1', 'run-42')], (
+        'without the link the dashboard cannot show a cycle\'s findings')
+
+
+def test_the_cycle_row_carries_the_window_it_asked_for():
+    """The window is stored because a bug that computed these dates in UTC
+    shipped once already, and it produced perfectly successful-looking runs
+    over a short window. Nothing in the database recorded what was asked."""
+    with _Cycles() as cyc, _AllConfigValid(), _Token(_jwt(30)), \
+            _Cms(), _Mail(None):
+        _capture(lambda: cycle.main([]))
+
+    started = cyc.started[0]
+    expected_from, expected_to = cubo_api.date_window()
+    assert started['window_start'] == expected_from
+    assert started['window_end'] == expected_to
+    assert started['host'], 'which machine wrote this is worth knowing'
+
+
+def test_the_token_expiry_reaches_the_cycle_row():
+    """So the countdown can appear in the app. Today it exists only as a
+    warning line in a log file on the Pi, which is not somewhere anyone looks
+    before it expires."""
+    with _Cycles() as cyc, _AllConfigValid(), _Token(_jwt(30)), \
+            _Cms(), _Mail(None):
+        _capture(lambda: cycle.main([]))
+    assert cyc.started[0]['token_expires_at'], 'expiry must be recorded'
+
+
+def test_an_unreadable_token_does_not_break_the_cycle_row():
+    """token_expiry_iso is decoration. check_token is what refuses to run."""
+    with _Token('an-opaque-token-value'):
+        assert cycle.token_expiry_iso() is None
+
+
+# ── Failure classification ───────────────────────────────────────────────────
+# One taxonomy for the log line, the exit code and the stored outcome. These
+# used to be three separate decisions, so an expired token and a refused CMS
+# request both arrived as a bare RuntimeError that nothing could tell apart.
+
+def test_each_kind_of_failure_gets_its_own_outcome():
+    import run as runner
+    import supabase_io as sio
+    cases = [
+        (cubo_api.CmsError('HTTP 403'),          'cms_error'),
+        (sio.SupabaseError('HTTP 401'),          'supabase_error'),
+        (token_store.TokenError('caducó'),       'token_error'),
+        (config.ConfigError('Missing'),          'config_error'),
+        (ValueError('unknown country'),          'unexpected'),
+    ]
+    for exc, expected in cases:
+        outcome, _, _ = runner.classify_failure(exc)
+        assert outcome == expected, f'{type(exc).__name__} -> {outcome}'
+
+
+def test_an_unknown_exception_keeps_its_message_out_of_the_record():
+    """Pandas exceptions can embed CSV row values in their messages, and the
+    outcome detail is stored in the database and rendered in the app."""
+    import run as runner
+
+    class _Pandasish(Exception):
+        pass
+
+    outcome, _, detail = runner.classify_failure(
+        _Pandasish('bad row: JON/GUERRERO 4111111111111111'))
+    assert outcome == 'unexpected'
+    assert '4111' not in detail, 'card data must never reach the record'
+    assert detail == '_Pandasish'
+
+
+def test_every_outcome_the_runner_can_write_is_allowed_by_the_migration():
+    """A contract test across the language boundary. An outcome the runner
+    emits but the check constraint rejects would fail the bookkeeping write
+    at exactly the moment something else had already gone wrong - and because
+    that write is best-effort, the failure would be swallowed and the cycle
+    would sit in 'running' forever."""
+    import re
+    import run as runner
+    import supabase_io as sio
+
+    sql_path = os.path.join(_ROOT, 'supabase', 'migrations',
+                            '0012_runner_cycles.sql')
+    sql = open(sql_path, encoding='utf-8').read()
+    block = re.search(r'check \(outcome in \((.*?)\)\)', sql, re.S)
+    assert block, 'the outcome check constraint moved or was renamed'
+    allowed = set(re.findall(r"'([a-z_]+)'", block.group(1)))
+
+    # The three written as literals rather than derived from an exception.
+    emitted = {'running', 'ok', 'no_email'}
+    for exc in (cubo_api.CmsError('x'), sio.SupabaseError('x'),
+                token_store.TokenError('x'), config.ConfigError('x'),
+                ValueError('x'), Exception('x')):
+        emitted.add(runner.classify_failure(exc)[0])
+
+    missing = emitted - allowed
+    assert not missing, (
+        f'the runner can write {sorted(missing)}, which migration 0012 '
+        f'would reject. Allowed: {sorted(allowed)}')
 
 
 # ── Runner ───────────────────────────────────────────────────────────────────

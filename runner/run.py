@@ -53,6 +53,7 @@ import cubo_api        # noqa: E402
 import dedup           # noqa: E402
 import state as runner_state   # noqa: E402
 import supabase_io     # noqa: E402
+import token_store     # noqa: E402  (for TokenError in classify_failure)
 
 
 # Every line this tool prints is Spanish, and merchant names carry accents.
@@ -367,7 +368,7 @@ def parse_args(argv=None):
 
 
 def process(source: Source, dry_run: bool = False,
-            run_source: str = 'auto') -> dict:
+            run_source: str = 'auto', cycle_id: str = None) -> dict:
     """Analyze one acquired CSV and sync it. Returns the action counts.
 
     Split out of main() so the scheduled cycle can reuse the pipeline instead
@@ -375,6 +376,12 @@ def process(source: Source, dry_run: bool = False,
     caller so that EVERY caller gets it - a `finally` that only one entry
     point remembered to write is the kind that stops running the day someone
     adds a second entry point.
+
+    `cycle_id` is passed only by the scheduled cycle (migration 0012). The
+    link is written here, as soon as the run row exists, rather than by the
+    caller at the end: a cycle that analyses successfully and then fails
+    while syncing still shows which run it produced, which is exactly the
+    case where knowing the run id is worth something.
     """
     staging = tempfile.mkdtemp(prefix='cubo-runner-')
     try:
@@ -392,6 +399,7 @@ def process(source: Source, dry_run: bool = False,
                 source.filename or audit_filename(findings),
                 source=run_source)
             log(f'Run registrado: {run_id}')
+            supabase_io.cycle_attach_run(cycle_id, run_id)
 
         counts = sync(findings, run_id, dry_run=dry_run)
 
@@ -419,23 +427,66 @@ def process(source: Source, dry_run: bool = False,
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def classify_failure(exc):
+    """(outcome, label, detail) for one exception.
+
+    ONE taxonomy, used by three things that must never disagree: the line in
+    the cron log, the exit code cron reads, and the `outcome` stored on the
+    runner_cycles row the dashboard renders (migration 0012). When these
+    drifted apart, a token that had expired and a CMS that was refusing our
+    headers both arrived as a bare RuntimeError, and nothing downstream could
+    tell them apart - which is the whole reason the outcome column exists.
+
+    `detail` may be STORED and displayed in the app, so it carries the same
+    discipline as the log: never a report URL (possession of one is
+    authorization to download a full transaction export), never a service
+    key, never CSV row data.
+
+    Order matters. CmsError, SupabaseError, TokenError and ConfigError are
+    all RuntimeError subclasses, so each has to be tested before the generic
+    RuntimeError branch or it would be swallowed by it.
+    """
+    if isinstance(exc, cubo_api.CmsError):
+        return 'cms_error', 'ERROR de descarga', str(exc)
+
+    if isinstance(exc, supabase_io.SupabaseError):
+        # PLAN.md: not worth retrying. The next run analyzes an overlapping
+        # window and covers whatever this one missed.
+        return 'supabase_error', 'ERROR de Supabase', str(exc)
+
+    if isinstance(exc, token_store.TokenError):
+        return 'token_error', 'ERROR', str(exc)
+
+    if isinstance(exc, config.ConfigError):
+        return 'config_error', 'ERROR', str(exc)
+
+    # gmail.py is imported lazily - only `--from-email` and the scheduled
+    # cycle pay for the OAuth stack. Reaching into sys.modules keeps that
+    # property: a GmailError cannot exist unless the module is already
+    # loaded, so if it is absent there is nothing to classify.
+    _gmail = sys.modules.get('gmail')
+    if _gmail is not None and isinstance(exc, _gmail.GmailError):
+        return 'gmail_error', 'ERROR de Gmail', str(exc)
+
+    if isinstance(exc, (FileNotFoundError, RuntimeError, ValueError)):
+        return 'unexpected', 'ERROR', str(exc)
+
+    # Pandas exceptions can embed CSV row values in their messages, so only
+    # the type name is safe to log or store.
+    return 'unexpected', 'ERROR inesperado', type(exc).__name__
+
+
 def report_failure(exc) -> int:
     """Turn an exception into an exit code and one readable line.
 
     Shared with the scheduled cycle so a cron log reads the same either way.
     """
-    if isinstance(exc, cubo_api.CmsError):
-        log(f'ERROR de descarga: {exc}')
-    elif isinstance(exc, supabase_io.SupabaseError):
-        # PLAN.md: not worth retrying. The next run analyzes an overlapping
-        # window and covers whatever this one missed.
-        log(f'ERROR de Supabase: {exc}')
-    elif isinstance(exc, (FileNotFoundError, RuntimeError, ValueError)):
-        log(f'ERROR: {exc}')
-    else:
-        # Pandas exceptions can embed CSV row values in their messages, so the
-        # type is printed but the traceback goes nowhere near a shared log.
-        log(f'ERROR inesperado: {type(exc).__name__}')
+    outcome, label, detail = classify_failure(exc)
+    log(f'{label}: {detail}')
+    if outcome == 'unexpected' and label == 'ERROR inesperado':
+        # The message was withheld above because it could carry CSV values.
+        # The traceback goes to stderr, which is the cron log on the Pi and
+        # nowhere shared.
         traceback.print_exc(file=sys.stderr)
     return 1
 

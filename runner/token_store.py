@@ -31,6 +31,20 @@ import sys
 IS_WINDOWS = sys.platform == 'win32'
 
 
+class TokenError(RuntimeError):
+    """The CMS token is missing, unreadable or expired.
+
+    A subclass of RuntimeError so every existing caller keeps catching it
+    unchanged. It exists so the scheduled cycle can record token trouble as
+    its own outcome (migration 0012): an expired token produces zero findings,
+    which is indistinguishable from a quiet fraud day, and it is the single
+    most likely scheduled failure this system has - the token lasts 90 days.
+
+    The fix is the same either way (re-capture the browser cURL), so missing
+    and expired share one class; the message says which.
+    """
+
+
 def default_state_dir() -> str:
     """Per-platform directory for runner state."""
     if IS_WINDOWS:
