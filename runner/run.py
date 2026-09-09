@@ -457,13 +457,24 @@ def _announce(findings: dict, events: list):
     mislabelled alert - and ops people who watch one country can trust the
     label they filter on.
     """
+    # Every exit here says why. A cycle with nothing new to announce and a
+    # cycle that failed to announce used to look identical in the log - an
+    # absent line - and telling them apart meant reading the dedup counts and
+    # knowing that notable() stays quiet for a re-detection. That ambiguity
+    # cost a real "Slack stopped working" investigation on 2026-09-09, when
+    # the answer was two consecutive cycles of `nuevos 0`.
     if not events:
+        log('Slack: sin novedades — lo detectado ya estaba en la cola')
         return
     country = country_code_of(findings)
     if not config.slack_enabled(country):
+        log(f'Slack: desactivado para {(country or "?").upper()}')
         return
     if slack.send_findings(country, events, findings.get('summary')):
         log(f'Slack: {len(events)} hallazgo(s) anunciados')
+    else:
+        # post() already printed the HTTP reason; this says what was lost.
+        log(f'Slack: NO se pudo anunciar {len(events)} hallazgo(s)')
 
 
 def classify_failure(exc):
