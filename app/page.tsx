@@ -147,6 +147,12 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4 MB — keep under Vercel's 4.5 MB r
 // Internal reports go to a US-style audit pipeline, so we pin en-US.
 const fmtNumber = (n: number) => n.toLocaleString('en-US');
 const fmtCurrency = (n: number, code: string = 'USD') => {
+  // 'UNKNOWN' is what the engine now returns when it cannot determine the
+  // currency, instead of silently defaulting to USD as it did for four
+  // months. Render the amount without asserting a currency it doesn't know.
+  if (!code || code === 'UNKNOWN') {
+    return `${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (sin moneda)`;
+  }
   try {
     return n.toLocaleString('en-US', { style: 'currency', currency: code });
   } catch {

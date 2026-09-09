@@ -9,10 +9,18 @@ const UNDO_WINDOW_HOURS = 24;
 
 const fmtCurrency = (n: number | null, code: string | null) => {
   if (n == null) return '—';
+  // Rows written before the 2026-09 currency fix carry 'UNKNOWN' (migration
+  // 0009): the engine could not tell GTQ from USD, so claiming either would
+  // be a guess. Show the amount without asserting a currency.
+  if (!code || code === 'UNKNOWN') {
+    return `${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (sin moneda)`;
+  }
   try {
-    return n.toLocaleString('en-US', { style: 'currency', currency: code || 'USD' });
+    return n.toLocaleString('en-US', { style: 'currency', currency: code });
   } catch {
-    return `${code || 'USD'} ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    // An ISO code we don't recognise - a country mapped server-side but not
+    // known to Intl. Render the number and the raw code rather than crashing.
+    return `${code} ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
 };
 

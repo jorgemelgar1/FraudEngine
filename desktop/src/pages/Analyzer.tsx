@@ -87,6 +87,11 @@ const fmt = (n: number | undefined) =>
 
 const fmtCurrency = (n: number | undefined, code = 'USD') => {
   if (n === undefined) return '—';
+  // 'UNKNOWN' means the engine could not determine the currency - see
+  // migration 0009. Claiming USD would be the original bug all over again.
+  if (!code || code === 'UNKNOWN') {
+    return `${n.toLocaleString('en-US')} (sin moneda)`;
+  }
   try {
     return n.toLocaleString('en-US', { style: 'currency', currency: code });
   } catch {
