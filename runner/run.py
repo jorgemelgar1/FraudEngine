@@ -51,6 +51,7 @@ for _p in (_HERE, _ROOT):
 import config          # noqa: E402
 import cubo_api        # noqa: E402
 import dedup           # noqa: E402
+import slack           # noqa: E402
 import state as runner_state   # noqa: E402
 import supabase_io     # noqa: E402
 import token_store     # noqa: E402  (for TokenError in classify_failure)
@@ -227,8 +228,15 @@ def audit_filename(findings: dict) -> str:
 
 # ── Step 3: de-duplicate and write ───────────────────────────────────────────
 
-def sync(findings: dict, run_id: str, dry_run: bool = False) -> dict:
-    """Apply the dedup decision to every finding. Returns action counts.
+def sync(findings: dict, run_id: str, dry_run: bool = False):
+    """Apply the dedup decision to every finding.
+
+    Returns `(counts, events)` - the action counts for the log, and the
+    subset of decisions worth telling a human about. The events are collected
+    here rather than recomputed later because this is the only place that
+    holds all three of (existing row, new finding, decision) at once; working
+    them out afterwards from the database would mean re-deriving a judgement
+    dedup.py has already made, with a second chance to make it differently.
 
     One lookup per finding. That is a round-trip per merchant per run - a few
     dozen at most - and keeps the "which row is the open one?" ordering in
@@ -237,10 +245,11 @@ def sync(findings: dict, run_id: str, dry_run: bool = False) -> dict:
     ordered, rows = build_findings_rows(run_id, findings)
     if not ordered:
         log('Sin hallazgos que sincronizar.')
-        return dedup.summarize([])
+        return dedup.summarize([]), []
 
     now = datetime.now(timezone.utc)
     decisions = []
+    events = []
     to_insert = []
     seen_at = {}      # finding_key -> index into `rows`
     insert_at = {}    # finding_key -> index into `to_insert`
@@ -270,6 +279,12 @@ def sync(findings: dict, run_id: str, dry_run: bool = False) -> dict:
         label = f'{finding.get("company_name")} [{section}]'
         log(f'  {decision.action:8} {label}: {decision.reason}')
 
+        # Collected even on a dry run, so `--dry-run` can show exactly what
+        # would have been announced without announcing it.
+        event = slack.notable(decision, finding, section)
+        if event:
+            events.append(event)
+
         if dry_run:
             continue
 
@@ -294,7 +309,7 @@ def sync(findings: dict, run_id: str, dry_run: bool = False) -> dict:
         inserted = supabase_io.insert_findings(to_insert)
         log(f'  {len(inserted)} hallazgos nuevos insertados')
 
-    return dedup.summarize(decisions)
+    return dedup.summarize(decisions), events
 
 
 # ── Step 4: remember what happened ───────────────────────────────────────────
@@ -401,11 +416,18 @@ def process(source: Source, dry_run: bool = False,
             log(f'Run registrado: {run_id}')
             supabase_io.cycle_attach_run(cycle_id, run_id)
 
-        counts = sync(findings, run_id, dry_run=dry_run)
+        counts, events = sync(findings, run_id, dry_run=dry_run)
 
         if not dry_run:
             supabase_io.record_indicator_hits(findings)
             _record_progress(source, findings)
+            # After the writes, never before: an alert about a finding that
+            # then failed to save would send someone to look for something
+            # that is not in the queue.
+            _announce(findings, events)
+        elif events:
+            log(f'DRY RUN - se habrían anunciado {len(events)} hallazgo(s) '
+                f'en Slack')
 
         log()
         log(f'nuevos {counts[dedup.INSERT]} · '
@@ -425,6 +447,23 @@ def process(source: Source, dry_run: bool = False,
                 log(f'AVISO: no se pudo borrar el CSV ({e}). Bórralo a mano: '
                     f'{source.path}')
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def _announce(findings: dict, events: list):
+    """Send the cycle's news to Slack. Best-effort and quiet when off.
+
+    The country comes from the CSV's own `country_name` column, never from
+    the report we asked for, so a mislabelled request cannot produce a
+    mislabelled alert - and ops people who watch one country can trust the
+    label they filter on.
+    """
+    if not events:
+        return
+    country = country_code_of(findings)
+    if not config.slack_enabled(country):
+        return
+    if slack.send_findings(country, events, findings.get('summary')):
+        log(f'Slack: {len(events)} hallazgo(s) anunciados')
 
 
 def classify_failure(exc):

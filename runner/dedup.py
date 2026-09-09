@@ -45,15 +45,28 @@ REOPEN = 'reopen'        # a rejected finding that escalated or aged out
 class Decision:
     """What to do, and why - the reason is logged and shown to reviewers."""
 
-    __slots__ = ('action', 'reason', 'promote', 'target_id')
+    __slots__ = ('action', 'reason', 'promote', 'target_id', 'escalated')
 
-    def __init__(self, action, reason, promote=False, target_id=None):
+    def __init__(self, action, reason, promote=False, target_id=None,
+                 escalated=None):
         self.action = action
         self.reason = reason
         # Only meaningful for UPDATE: a Monitor-tier row that has reached
         # Critical must move into the review queue.
         self.promote = promote
         self.target_id = target_id
+        # Why this re-detection is worth someone's attention, or None.
+        #
+        # Separate from `reason`, which explains what happened to the ROW.
+        # Almost every re-detection is an UPDATE - a merchant is seen ~16
+        # times before ageing out of the window - and telling anyone about
+        # those would be sixteen notifications per merchant. This field marks
+        # the few that are genuinely news: the score climbed materially, or
+        # the finding crossed into Critical.
+        #
+        # It exists on the Decision rather than in the notifier so it stays a
+        # pure function of the same three inputs, testable without a network.
+        self.escalated = escalated
 
     def __repr__(self):
         return f'<Decision {self.action}: {self.reason}>'
@@ -137,10 +150,16 @@ def decide(existing, finding, now=None):
     # Refresh rather than duplicate. The reviewer must see the CURRENT score:
     # a merchant first caught at 45 that is now at 90 is a different decision.
     if status == 'pending':
+        # A merchant already in the queue at 45 that is now at 90 is news; the
+        # same merchant seen again at 46 is not. Same rule and same threshold
+        # as the rejected branch below - one definition of "materially worse",
+        # not two that drift apart.
         return Decision(
             UPDATE,
             f'ya pendiente, visto de nuevo (puntaje {old_score} → {new_score})',
             target_id=target,
+            escalated=escalation_reason(old_score, old_conf,
+                                        new_score, new_conf),
         )
 
     # ── Monitor tier ─────────────────────────────────────────────────────
@@ -151,7 +170,14 @@ def decide(existing, finding, now=None):
         promote = new_conf == 'Critical'
         reason = ('escaló a Critical, entra a revisión' if promote
                   else 'sigue en Monitor, se actualiza sin encolar')
-        return Decision(UPDATE, reason, promote=promote, target_id=target)
+        # A promotion is the most meaningful escalation there is: something
+        # filed as informational now needs a human. A Monitor row that merely
+        # gets a higher Monitor score is not worth interrupting anyone for.
+        return Decision(
+            UPDATE, reason, promote=promote, target_id=target,
+            escalated=(f'pasó de {old_conf or "Monitor"} a Critical'
+                       if promote else None),
+        )
 
     # ── Accepted ─────────────────────────────────────────────────────────
     # Already actioned and on the watchlist. Re-alerting adds nothing a
@@ -166,7 +192,8 @@ def decide(existing, finding, now=None):
     if status == 'rejected':
         escalated = escalation_reason(old_score, old_conf, new_score, new_conf)
         if escalated:
-            return Decision(REOPEN, escalated, target_id=target)
+            return Decision(REOPEN, escalated, target_id=target,
+                            escalated=escalated)
 
         until = existing.get('suppressed_until')
         if until is None:

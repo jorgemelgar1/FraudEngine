@@ -240,6 +240,20 @@ def test_values_this_script_does_not_manage_survive_a_rewrite():
     assert 'https://old.supabase.co' not in written
 
 
+def test_the_slack_webhook_survives_a_rewrite():
+    """Same hazard as the Gmail pair, and worse to diagnose: losing the
+    webhook does not break anything visibly. The runner keeps analysing and
+    keeps syncing — it just stops telling anyone, which looks exactly like a
+    quiet fraud week."""
+    pattern, _ = setup_env.pattern_from_link(LINK)
+    secret = 'https://hooks.slack.example/services/T0/B0/TOKENTOKENTOKEN'
+    written, carried = _write_to_temp(
+        _values(pattern), {'SLACK_WEBHOOK_URL': secret})
+
+    assert f'SLACK_WEBHOOK_URL={secret}' in written
+    assert 'SLACK_WEBHOOK_URL' in carried
+
+
 def test_report_sender_is_written():
     """Its absence is what made `gmail.py --check` fail after the Gmail work
     landed: setup predated it and never asked."""

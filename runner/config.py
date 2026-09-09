@@ -176,6 +176,49 @@ GMAIL_CLIENT_ID = _env('GMAIL_CLIENT_ID')
 GMAIL_CLIENT_SECRET = _env('GMAIL_CLIENT_SECRET')
 
 
+# ── Slack ────────────────────────────────────────────────────────────────────
+# An incoming-webhook URL is a CREDENTIAL: possession of it is permission to
+# post into the channel, exactly like the report CDN link. It is never logged,
+# never printed, and never leaves this machine except in the POST itself.
+#
+# Deliberately absent from GROUPS below. Slack is an enhancement, not a
+# dependency - a runner with no webhook configured must analyse and sync
+# perfectly well, in silence. Making it required would mean a missing
+# notification setting stops fraud detection, which is exactly backwards.
+
+SLACK_WEBHOOK_URL = _env('SLACK_WEBHOOK_URL')
+
+# Per-country overrides, so a single shared channel can later become one
+# channel per ops team without touching any code. Falls back to the default
+# above, which is the only one configured today.
+SLACK_WEBHOOK_BY_COUNTRY = {
+    code: _env(f'SLACK_WEBHOOK_URL_{code}') for code in ('SV', 'PA', 'GT')
+}
+
+# Whether new Monitor-tier merchants get a line of their own in the message.
+# 'summary' (default) collapses them to a count plus names; 'off' omits them
+# entirely. Critical findings are never suppressed by this.
+SLACK_MONITOR = (_env('SLACK_MONITOR', 'summary') or 'summary').strip().lower()
+
+# Consecutive failed cycles for one country before the channel hears about it.
+# Not 1: a single miss is absorbed by the overlapping windows, and alerting on
+# it would train everyone to ignore the alerts.
+SLACK_FAILURE_STREAK = int(_env('SLACK_FAILURE_STREAK', '3'))
+
+
+def slack_webhook_for(country_code: str = None) -> str:
+    """The webhook this country's alerts go to, or '' if Slack is off."""
+    if country_code:
+        specific = SLACK_WEBHOOK_BY_COUNTRY.get(country_code.upper())
+        if specific:
+            return specific
+    return SLACK_WEBHOOK_URL or ''
+
+
+def slack_enabled(country_code: str = None) -> bool:
+    return bool(slack_webhook_for(country_code))
+
+
 # ── Startup validation ───────────────────────────────────────────────────────
 
 # Grouped so each entry point demands only what it actually uses. Manual-URL

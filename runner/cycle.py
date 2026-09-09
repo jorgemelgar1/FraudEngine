@@ -52,6 +52,7 @@ if _HERE not in sys.path:
 import config          # noqa: E402
 import cubo_api        # noqa: E402
 import run as runner   # noqa: E402
+import slack           # noqa: E402
 import state as runner_state   # noqa: E402
 import supabase_io     # noqa: E402
 import token_store     # noqa: E402
@@ -185,6 +186,70 @@ def show_request(country: str = None, lookback_days: int = None) -> int:
     return 0
 
 
+# Only the cycle that runs at this local hour reports a soon-to-expire token
+# to Slack. The check itself happens every cycle, but the runner wakes 24
+# times a day and a warning repeated 24 times a day for a week is not a
+# warning, it is wallpaper. A fixed hour gives exactly one message a day and
+# needs nothing stored to remember whether it already sent one.
+TOKEN_ALERT_HOUR = 9
+
+
+def alert_failure_streak(country: str, outcome: str):
+    """Tell Slack when a country has stopped working, once.
+
+    Fires on the cycle where the streak EQUALS the threshold, not where it
+    exceeds it, so a country that stays broken produces one message rather
+    than one an hour. Recovering resets the count, which re-arms it.
+
+    'no_email' counts toward the streak even though a single one is normal:
+    three cycles in a row with no report arriving means the reports are not
+    coming, which is a real problem wearing the costume of a designed
+    behaviour.
+    """
+    if outcome == 'ok' or not config.slack_enabled(country):
+        return
+
+    row = next((h for h in supabase_io.runner_health()
+                if h.get('country_code') == country), None)
+    if not row:
+        return
+
+    streak = row.get('consecutive_failures') or 0
+    if streak != config.SLACK_FAILURE_STREAK:
+        return
+
+    name = config.country_by_code(country)['name']
+    slack.send_health(
+        f'{name} lleva {streak} ciclos sin completarse',
+        detail=row.get('last_detail') or f'Último resultado: {outcome}',
+        fix='Abre la pestaña Runner en la app para ver los ciclos y el '
+            'comando que corresponde a este error.',
+        level='bad', country_code=country)
+
+
+def alert_token_expiry(token: str, now: datetime = None):
+    """One message a day while the CMS token is close to expiring."""
+    now = now or datetime.now()
+    if now.hour != TOKEN_ALERT_HOUR or not config.slack_enabled():
+        return
+
+    expires_at, seconds_left = token_store.expiry(token)
+    if expires_at is None or seconds_left is None:
+        return
+    days = seconds_left / 86400
+    if days >= TOKEN_WARN_DAYS:
+        return
+
+    slack.send_health(
+        f'el token del CMS vence en {days:.0f} día(s)',
+        detail=f'Caduca el {expires_at:%Y-%m-%d}. Sin token, el runner no '
+               f'puede pedir reportes y dejará de encontrar fraude en '
+               f'silencio.',
+        fix='Captura de nuevo el cURL del navegador y pásalo por '
+            'python3 runner/import_curl.py',
+        level='warn')
+
+
 def token_expiry_iso():
     """The CMS token's expiry as an ISO string, or None if unreadable.
 
@@ -221,6 +286,7 @@ def run_cycle(country: str, dry_run: bool = False,
         return 0
 
     token = check_token()
+    alert_token_expiry(token)
 
     # Everything from here is timed against `requested_at`. A report that
     # arrived BEFORE we asked belongs to an earlier cycle; consuming it would
@@ -269,10 +335,23 @@ def main(argv=None) -> int:
                         help='print the exact request that would be sent')
     parser.add_argument('--lookback-days', type=int, default=None,
                         help='override the window (default: today + yesterday)')
+    parser.add_argument('--slack-test', action='store_true',
+                        help='send one test message to Slack, then exit')
     args = parser.parse_args(argv)
 
     if args.health:
         return health()
+
+    if args.slack_test:
+        if not config.slack_enabled(args.country):
+            print('Slack no está configurado. Añade SLACK_WEBHOOK_URL a '
+                  'runner/.env.\nSin él, el runner funciona igual pero en '
+                  'silencio.')
+            return 1
+        ok = slack.send_test(args.country)
+        print('Mensaje enviado.' if ok
+              else 'No se pudo enviar; revisa el detalle de arriba.')
+        return 0 if ok else 1
 
     if args.show_request:
         # Only the CMS block is needed to build the request, and demanding
@@ -292,7 +371,11 @@ def main(argv=None) -> int:
         except Exception as e:                              # noqa: BLE001
             return runner.report_failure(e)
 
+    # Both initialised before the try, because the handlers below read them
+    # and either assignment can be skipped by an exception - a NameError in
+    # an error handler would replace the real failure with a fake one.
     cycle_id = None
+    country = None
     try:
         # Supabase is validated first and on its own, because it is the
         # minimum needed to record anything at all. Validating everything up
@@ -318,11 +401,16 @@ def main(argv=None) -> int:
     except NoReportEmail as e:
         supabase_io.cycle_finish(cycle_id, 'no_email', str(e))
         log(str(e))
+        # A single slow report is normal; three in a row is not, and only the
+        # streak knows the difference.
+        alert_failure_streak(country, 'no_email')
         return 0
 
     except Exception as e:                                  # noqa: BLE001
         outcome, _, detail = runner.classify_failure(e)
         supabase_io.cycle_finish(cycle_id, outcome, detail)
+        if country:
+            alert_failure_streak(country, outcome)
         return runner.report_failure(e)
 
 

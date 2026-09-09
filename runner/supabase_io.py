@@ -336,6 +336,25 @@ def cycle_finish(cycle_id: str, outcome: str, detail: str = None):
         return False
 
 
+def runner_health():
+    """Per-country health, as the dashboard sees it (migration 0012).
+
+    The runner reads its OWN health record to decide whether a failure is
+    worth interrupting anyone about. Deriving that here instead - "was the
+    last one bad?" - would alert on every single miss, and the overlapping
+    windows absorb a single miss by design.
+
+    Returns [] rather than raising: this only ever feeds a notification
+    decision, and being unable to check must not turn into a second failure
+    on top of the one being checked.
+    """
+    try:
+        return sb_rpc('runner_health', {}) or []
+    except SupabaseError as e:
+        print(f'  [ciclo] no se pudo leer runner_health: {e}')
+        return []
+
+
 def cycle_attach_run(cycle_id: str, run_id: str):
     """Point a cycle row at the analysis_runs row it produced.
 

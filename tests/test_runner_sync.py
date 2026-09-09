@@ -168,13 +168,25 @@ def _report(critical=None, monitor=None, zero=None, currency='GTQ'):
 
 
 def _sync(report, fake, dry_run=False):
-    """Run sync() against the fake, with its logging silenced."""
+    """Run sync() against the fake, with its logging silenced.
+
+    Returns (counts, output). sync() also returns the notification events;
+    those have their own helper below so the existing assertions here stay
+    about de-duplication rather than about Slack.
+    """
+    counts, _events, output = _sync_full(report, fake, dry_run=dry_run)
+    return counts, output
+
+
+def _sync_full(report, fake, dry_run=False):
+    """(counts, events, output) — for the tests that care what got announced."""
     original = run.supabase_io
     run.supabase_io = fake
     buf = io.StringIO()
     try:
         with redirect_stdout(buf):
-            return run.sync(report, RUN_ID, dry_run=dry_run), buf.getvalue()
+            counts, events = run.sync(report, RUN_ID, dry_run=dry_run)
+        return counts, events, buf.getvalue()
     finally:
         run.supabase_io = original
 

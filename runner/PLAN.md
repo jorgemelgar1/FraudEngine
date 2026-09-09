@@ -323,10 +323,39 @@ the runner is live and the volume of retained findings grows.
    - **Automated vs manual** is now a chip on each group in Pendientes, keyed
      off `analysis_runs.source` rather than the uploader's email.
 
-8. **Still to do** — **Slack notifications.** The CTO's endpoint and key are
-   already in hand. This is the answer to the alerting gap below: one
-   integration covers both "fraud found" and "the runner died", and
-   `runner_cycles` is already the row it would read.
+8. ~~**Slack notifications.**~~ **Done** — `runner/slack.py`, 32 tests.
+   - **The hard part is not sending, it is not sending.** A merchant is
+     re-detected ~16 times before ageing out, so the trigger is not "a
+     finding exists" but "de-duplication decided this is news": a first
+     detection, a material score climb, or a crossing into Critical.
+     `slack.notable()` is the single place that projects a `Decision` into a
+     notification, and it returns `None` for the overwhelmingly common
+     re-detection.
+   - **One gap had to be closed first.** `escalation_reason()` was only
+     consulted on the *rejected* branch, so a merchant already in the queue
+     whose score jumped 45 → 90 produced an ordinary UPDATE. `Decision` now
+     carries an `escalated` field, populated on every branch by that same
+     function, so there is one definition of "materially worse".
+   - **One message per cycle, none when nothing is new.** Critical findings
+     get a line each (worst first), new Monitor merchants collapse to a
+     count plus names. That caps the channel at 24 messages a day in the
+     worst case and near zero in practice.
+   - **Health alerts share the channel**, hard rate-limited: a country's
+     failure alert fires on the cycle where the streak *equals*
+     `SLACK_FAILURE_STREAK`, so it sends once and re-arms on success — no
+     new state. The token warning is sent by the 09:00 cycle only.
+   - Off by default: no `SLACK_WEBHOOK_URL` means silence, never a crash.
+     Verify with `python3 runner/cycle.py --slack-test`.
+   - **No card data leaves the app.** Merchant, score, exposure and
+     fingerprints only; a test asserts BINs, last-4 and cardholder names
+     cannot reach a message.
+
+9. **Still to do — a dead-man's switch.** The runner cannot alert that it is
+   dead: if the Pi is off, nothing runs to send the message. Closing that
+   needs something outside the Pi — Supabase `pg_cron` + `pg_net` reading
+   `runner_health()` (keeps the secret where the service key already lives),
+   or a scheduled GitHub Action. Until then the Runner tab's badge covers it
+   whenever somebody opens the app.
 
 Steps 1–4 are useful on their own, and now exist: you can analyze any report
 link you paste, which is already better than exporting and uploading by hand.
