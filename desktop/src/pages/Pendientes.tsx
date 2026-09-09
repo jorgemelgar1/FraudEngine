@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 
-import { listPending, reviewFindings, type PendingFinding } from '../lib/findings';
+import {
+  listPending, reviewFindings, reopenInfo, countryCodeOf,
+  type PendingFinding,
+} from '../lib/findings';
 import { isNetworkError } from '../lib/offline';
 import { OfflineState } from '../components/OfflineState';
 
@@ -33,6 +36,13 @@ const fmtCurrency = (n: number | null, code: string | null) => {
   }
 };
 
+const fmtDay = (iso: string | null | undefined) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('es', { day: 'numeric', month: 'short' });
+};
+
 // One-line stand-in for the exposure figure on zero-settlement findings,
 // pulled from the detector's own `metrics` block in the payload. Returns a
 // generic line if the payload predates the metrics block or is shaped
@@ -55,6 +65,9 @@ export function Pendientes({
   onChanged: () => void;
 }) {
   const [findings, setFindings] = useState<PendingFinding[] | null>(null);
+  // Total pending, ignoring the query limit. Kept so the screen can SAY it is
+  // showing a subset instead of silently pretending the rest do not exist.
+  const [total, setTotal] = useState(0);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -76,8 +89,9 @@ export function Pendientes({
     setError('');
     setOffline(false);
     try {
-      const rows = await listPending();
-      setFindings(rows);
+      const page = await listPending();
+      setFindings(page.rows);
+      setTotal(page.total);
     } catch (e) {
       if (isNetworkError(e)) {
         setOffline(true);
@@ -172,6 +186,14 @@ export function Pendientes({
           equipo lo acepte (se agrega a la Watchlist) o lo descarte. Los
           falsos positivos descartados no afectan la Watchlist.
         </p>
+        {/* Past the query limit the list is a subset. Saying so beats the
+            header badge quietly disagreeing with what is on screen. */}
+        {findings !== null && total > findings.length && (
+          <div className="error-banner">
+            Mostrando {findings.length} de {total} pendientes, los de mayor
+            riesgo primero. Revisa algunos para ver el resto.
+          </div>
+        )}
         {error && <div className="error-banner">{error}</div>}
         {findings === null && <p className="muted">Cargando…</p>}
         {findings !== null && findings.length === 0 && (
@@ -235,11 +257,38 @@ export function Pendientes({
                 const isBusy = busy.has(f.id);
                 const evidence = ((f.payload as any)?.evidence || []) as Array<Record<string, unknown>>;
                 const action = (f.payload as any)?.recommended_action_es as string | undefined;
+                const reopened = reopenInfo(f);
+                const country = countryCodeOf(f.analysis_runs?.currency_source);
+                const seen = f.times_seen ?? 1;
                 return (
                   <li key={f.id} className="finding critical">
+                    {/* The runner re-opens a dismissed finding when it comes
+                        back materially worse, and records why. Until now that
+                        reason was written and never shown, so a re-opened
+                        finding looked brand new — and a reviewer could dismiss
+                        it again on reasoning that had since stopped being
+                        true. Slack now points people straight here. */}
+                    {reopened && (
+                      <div className="reopen-banner">
+                        <div className="reopen-title">⟳ Ya se revisó antes</div>
+                        <div>
+                          Descartado
+                          {reopened.rejectedBy ? ` por ${reopened.rejectedBy}` : ''}
+                          {' '}el {fmtDay(reopened.rejectedAt)}
+                          {reopened.reason
+                            ? <> · volvió porque <strong>{reopened.reason}</strong>.</>
+                            : ' · volvió a la cola.'}
+                        </div>
+                      </div>
+                    )}
                     <div className="finding-head">
                       <div style={{ flex: '1 1 320px' }}>
                         <strong>{f.company_name}</strong>
+                        {country && (
+                          <span className="tag country" style={{ marginLeft: '0.5rem' }}>
+                            {country}
+                          </span>
+                        )}
                         {f.section === 'zero_settlement' && (
                           <span className="tag zero-settlement" style={{ marginLeft: '0.6rem' }}>
                             Sin liquidación
@@ -272,6 +321,14 @@ export function Pendientes({
                     {f.description_es && (
                       <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>{f.description_es}</p>
                     )}
+                    {/* Stored since migration 0010 and read by nothing until
+                        now. One sighting may be noise; sixteen in a row is
+                        not, and that is the cheapest way to prioritise. */}
+                    <div className="muted small">
+                      {seen > 1
+                        ? `Visto ${seen} veces desde el ${fmtDay(f.first_seen_at)}`
+                        : `Primera detección${f.first_seen_at ? `, el ${fmtDay(f.first_seen_at)}` : ''}`}
+                    </div>
                     <div className="tags">
                       {(f.fingerprints || []).map(fp => (
                         <span className="tag" key={fp}>{fp}</span>

@@ -852,3 +852,31 @@ section h3 { margin: 0 0 0.75rem; }
 .tag.origin { font-weight: 600; letter-spacing: 0.02em; }
 .tag.origin.auto   { background: #F0FBF8; color: #0F766E; }
 .tag.origin.manual { background: #F1F5F9; color: var(--text-muted); }
+
+/* ── A finding that was dismissed and came back ──────────────────────────
+   Amber, not red: the finding's own severity is already carried by the red
+   left border on .finding.critical. This band is context — "you have seen
+   this before" — and painting it red too would flatten the distinction. */
+.reopen-banner {
+  border-left: 3px solid var(--monitor);
+  background: #FFF7ED;
+  border-radius: 6px;
+  padding: 0.55rem 0.8rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.86rem;
+  color: var(--cubo-navy);
+}
+.reopen-title {
+  font-weight: 600;
+  color: #9A3412;
+  margin-bottom: 0.1rem;
+}
+
+/* Country on a finding. Ops is split by country, so this answers "is this
+   mine?" without opening anything. */
+.tag.country {
+  background: #EEF2FF;
+  color: #3730A3;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}

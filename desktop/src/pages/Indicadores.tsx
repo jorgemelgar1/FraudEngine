@@ -96,19 +96,27 @@ export function Indicadores({
     }
   }
 
+  // `.main` is what supplies the page padding and the 1100px max-width. This
+  // was the only screen in the app that skipped it, so its text ran edge to
+  // edge on a wide monitor and became genuinely hard to read. `.report` is a
+  // content class, not a layout one — every other page nests it inside
+  // `.main` exactly like this.
   if (!online) {
     return (
-      <div className="report">
-        <h2>Indicadores de fraude confirmado</h2>
-        <div className="info-banner">
-          Necesitas conexión para ver y editar los indicadores. La lista es
-          compartida con todo el equipo, así que no se guarda una copia local.
+      <main className="main">
+        <div className="report">
+          <h2>Indicadores de fraude confirmado</h2>
+          <div className="info-banner">
+            Necesitas conexión para ver y editar los indicadores. La lista es
+            compartida con todo el equipo, así que no se guarda una copia local.
+          </div>
         </div>
-      </div>
+      </main>
     );
   }
 
   return (
+    <main className="main">
     <div className="report">
       <h2>Indicadores de fraude confirmado</h2>
       <p className="phase-note">
@@ -270,5 +278,6 @@ export function Indicadores({
         )}
       </section>
     </div>
+    </main>
   );
 }
