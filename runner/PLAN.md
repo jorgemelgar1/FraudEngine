@@ -264,9 +264,10 @@ the runner is live and the volume of retained findings grows.
    **Done** — `runner/gmail.py` + `runner/report_mail.py` + `runner/state.py`,
    42 tests. Stdlib only: OAuth is a form POST and reading a message is a GET,
    so no `google-api-python-client`.
-6. **Trigger + scheduler** — `trigger_report()` exists but nothing calls it;
-   needs the CMS token on the Pi, then cron hourly with rotation by `hour % 3`.
-7. **UI additions** — `times_seen`, `source`.
+6. ~~**Trigger + scheduler**~~ **Done** — `runner/cycle.py` +
+   `runner/cron-run.sh`, 16 tests. Needs the CMS token on the Pi and one
+   crontab line.
+7. **UI additions** — `times_seen`, `source`. The only piece left.
 
 Steps 1–4 are useful on their own, and now exist: you can analyze any report
 link you paste, which is already better than exporting and uploading by hand.
@@ -324,6 +325,36 @@ happens in a `finally`, so it survives a crash mid-analysis.
 
 ---
 
+## Scheduling it
+
+```bash
+crontab -e
+```
+
+```
+0 * * * * /home/<you>/fraud-engine/runner/cron-run.sh
+```
+
+One line, hourly. The country comes from the clock (`hour % 3`), so cron needs
+to know nothing about the rotation and a missed hour does not shift it.
+
+`cron-run.sh` exists because cron runs with almost no environment: no
+virtualenv, a bare `PATH`, and a working directory that is not the repository.
+It also holds a `flock`, so a cycle still waiting for its email cannot be
+joined by the next hour's — two identical report mails in the mailbox is
+exactly the ambiguity the schedule is designed to avoid. A skipped slot is
+logged as `SKIPPED` and exits 0, because it is not a failure.
+
+Logs go to `~/fraud-engine-logs/cycle-YYYY-MM-DD.log`, kept 14 days: long
+enough to answer "it stopped working last Tuesday", short enough that an SD
+card never fills because of us.
+
+```bash
+python3 runner/cycle.py --health     # which countries have gone quiet
+```
+
+---
+
 ## Settled
 
 - Rejection cooloff: **48 h, with score-escalation override**
@@ -337,6 +368,8 @@ happens in a `finally`, so it survives a crash mid-analysis.
 
 - Timezone the API applies to `createdAt`
 - Gmail OAuth client — needs a Google Cloud project
-- Alerting channel when the runner fails (email to self? the Slack work that
-  was deferred?)
+- Alerting channel when the runner fails. `cycle.py --health` reports which
+  countries have gone quiet and exits non-zero, which is enough for a person
+  to check but does not reach anyone by itself. The deferred Slack work is the
+  obvious home for it.
 - Whether to add a weekly 7-day sweep for slow-burn merchants

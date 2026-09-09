@@ -128,7 +128,18 @@ def _download(url: str) -> str:
     # messages and backups.
     dest = os.path.join(config.work_dir(), f'report-{uuid.uuid4().hex}.csv')
     log(f'Descargando {cubo_api.redact_url(url)}')
-    written = cubo_api.download_csv(url, dest)
+    try:
+        written = cubo_api.download_csv(url, dest)
+    except Exception:
+        # A download that dies halfway leaves a partial file, and nothing
+        # downstream will ever own it - process() only cleans up files it was
+        # handed. Transaction data must not accumulate in a temp directory.
+        if os.path.exists(dest):
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+        raise
     log(f'  {written:,} bytes')
     return dest
 
@@ -355,6 +366,80 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def process(source: Source, dry_run: bool = False,
+            run_source: str = 'auto') -> dict:
+    """Analyze one acquired CSV and sync it. Returns the action counts.
+
+    Split out of main() so the scheduled cycle can reuse the pipeline instead
+    of carrying a second copy of it. The cleanup is in here rather than in the
+    caller so that EVERY caller gets it - a `finally` that only one entry
+    point remembered to write is the kind that stops running the day someone
+    adds a second entry point.
+    """
+    staging = tempfile.mkdtemp(prefix='cubo-runner-')
+    try:
+        findings = run_analysis(source.path, staging)
+        log('Análisis completo:')
+        print(describe(findings))
+
+        if dry_run:
+            log('DRY RUN - no se escribe nada en Supabase')
+            # build_findings_rows needs a run_id shaped like the real thing.
+            run_id = str(uuid.UUID(int=0))
+        else:
+            run_id = supabase_io.insert_run(
+                findings['summary'],
+                source.filename or audit_filename(findings),
+                source=run_source)
+            log(f'Run registrado: {run_id}')
+
+        counts = sync(findings, run_id, dry_run=dry_run)
+
+        if not dry_run:
+            supabase_io.record_indicator_hits(findings)
+            _record_progress(source, findings)
+
+        log()
+        log(f'nuevos {counts[dedup.INSERT]} · '
+            f'actualizados {counts[dedup.UPDATE]} · '
+            f'reabiertos {counts[dedup.REOPEN]} · '
+            f'silenciados {counts[dedup.SUPPRESS]}')
+        return counts
+
+    finally:
+        # Runs even when the analysis threw - which is exactly when a
+        # half-processed file would otherwise be left on disk.
+        if source.delete_after and os.path.exists(source.path):
+            try:
+                os.remove(source.path)
+                log('CSV eliminado.')
+            except OSError as e:
+                log(f'AVISO: no se pudo borrar el CSV ({e}). Bórralo a mano: '
+                    f'{source.path}')
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def report_failure(exc) -> int:
+    """Turn an exception into an exit code and one readable line.
+
+    Shared with the scheduled cycle so a cron log reads the same either way.
+    """
+    if isinstance(exc, cubo_api.CmsError):
+        log(f'ERROR de descarga: {exc}')
+    elif isinstance(exc, supabase_io.SupabaseError):
+        # PLAN.md: not worth retrying. The next run analyzes an overlapping
+        # window and covers whatever this one missed.
+        log(f'ERROR de Supabase: {exc}')
+    elif isinstance(exc, (FileNotFoundError, RuntimeError, ValueError)):
+        log(f'ERROR: {exc}')
+    else:
+        # Pandas exceptions can embed CSV row values in their messages, so the
+        # type is printed but the traceback goes nowhere near a shared log.
+        log(f'ERROR inesperado: {type(exc).__name__}')
+        traceback.print_exc(file=sys.stderr)
+    return 1
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
 
@@ -367,66 +452,16 @@ def main(argv=None) -> int:
         needed += ['gmail', 'mail']
     config.validate(*needed)
 
-    source = None
-    staging = tempfile.mkdtemp(prefix='cubo-runner-')
-
     try:
         source = acquire_csv(args)
-        findings = run_analysis(source.path, staging)
-        log('Análisis completo:')
-        print(describe(findings))
-
-        run_id = 'dry-run'
-        if args.dry_run:
-            log('DRY RUN - no se escribe nada en Supabase')
-            # build_findings_rows needs a run_id shaped like the real thing.
-            run_id = str(uuid.UUID(int=0))
-        else:
-            run_id = supabase_io.insert_run(
-                findings['summary'],
-                source.filename or audit_filename(findings),
-                source=args.source)
-            log(f'Run registrado: {run_id}')
-
-        counts = sync(findings, run_id, dry_run=args.dry_run)
-
-        if not args.dry_run:
-            supabase_io.record_indicator_hits(findings)
-            _record_progress(source, findings)
-
-        log()
-        log(f'nuevos {counts[dedup.INSERT]} · '
-            f'actualizados {counts[dedup.UPDATE]} · '
-            f'reabiertos {counts[dedup.REOPEN]} · '
-            f'silenciados {counts[dedup.SUPPRESS]}')
-        return 0
-
-    except cubo_api.CmsError as e:
-        log(f'ERROR de descarga: {e}')
-        return 1
-    except supabase_io.SupabaseError as e:
-        # PLAN.md: a Supabase failure is not worth retrying here. The next run
-        # analyzes an overlapping window and covers whatever this one missed.
-        log(f'ERROR de Supabase: {e}')
-        return 1
     except Exception as e:                                  # noqa: BLE001
-        # Pandas exceptions can embed CSV row values in their messages, so the
-        # type is printed but the traceback goes nowhere near a shared log.
-        log(f'ERROR inesperado: {type(e).__name__}')
-        traceback.print_exc(file=sys.stderr)
-        return 1
+        return report_failure(e)
 
-    finally:
-        # Runs even when the analysis threw - which is exactly when a
-        # half-processed file would otherwise be left on disk.
-        if source and source.delete_after and os.path.exists(source.path):
-            try:
-                os.remove(source.path)
-                log('CSV eliminado.')
-            except OSError as e:
-                log(f'AVISO: no se pudo borrar el CSV ({e}). Bórralo a mano: '
-                    f'{source.path}')
-        shutil.rmtree(staging, ignore_errors=True)
+    try:
+        process(source, dry_run=args.dry_run, run_source=args.source)
+        return 0
+    except Exception as e:                                  # noqa: BLE001
+        return report_failure(e)
 
 
 if __name__ == '__main__':
