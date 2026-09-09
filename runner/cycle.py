@@ -225,7 +225,8 @@ def alert_failure_streak(country: str, outcome: str):
     name = config.country_by_code(country)['name']
     slack.send_health(
         f'{name} lleva {streak} ciclos sin completarse',
-        detail=row.get('last_detail') or f'Último resultado: {outcome}',
+        detail=row.get('last_detail')
+            or f'Último resultado: {slack.outcome_label(outcome)}',
         fix='Abre la pestaña Runner en la app para ver los ciclos y el '
             'comando que corresponde a este error.',
         level='bad', country_code=country)

@@ -163,6 +163,76 @@ _KIND_LABEL = {
 }
 
 
+# Fingerprints and tiers arrive from the engine as English snake_case keys.
+# They are identifiers, not prose, and a channel read by ops in Spanish should
+# never show them raw. These are the SAME strings the app shows in Pendientes
+# (desktop/src/lib/patterns.ts) - deliberately duplicated across the language
+# boundary rather than fetched, because the runner must be able to describe a
+# finding with Supabase unreachable. tests/test_slack_spanish.py fails if the
+# two ever drift.
+_PATTERN_LABEL = {
+    'amount_ladder':                       'Escalera de montos',
+    'velocity_burst':                      'Ráfaga de intentos',
+    'round_number_repetition':             'Montos redondos',
+    'bin_diversity_burst':                 'Muchos bancos distintos',
+    'high_reject_rate':                    'Rechazos muy altos',
+    'critical_codes':                      'Rechazos por fraude',
+    'minfraud_blocked':                    'Bloqueado por MinFraud',
+    'watchlist_merchant':                  'Reincidente',
+    'watchlist_card':                      'Tarjeta ya marcada',
+    'cross_merchant_reuse':                'Tarjeta compartida',
+    'channel_switch_retry':                'Reintento por otro canal',
+    'real_name_rotation':                  'Identidades rotativas',
+    'multi_test_transactions':             'Cobros de prueba',
+    'foreign_card_velocity':               'Tarjetas extranjeras',
+    'confirmed_indicator_exact':           'Fraude confirmado',
+    'confirmed_indicator_cross_merchant':  'Confirmado en otro comercio',
+    'confirmed_indicator_fuzzy':           'Parecido a fraude confirmado',
+}
+
+_TIER_LABEL = {'Critical': 'Crítico', 'Monitor': 'Monitor'}
+
+
+# The runner_cycles.outcome vocabulary (migration 0012). Same reasoning as
+# the fingerprints: these are column values, not sentences, and "cms_error"
+# in a Spanish channel tells an analyst nothing they can act on.
+_OUTCOME_LABEL = {
+    'running':        'en curso',
+    'ok':             'correcto',
+    'no_email':       'no llegó el correo con el reporte',
+    'cms_error':      'falló la descarga desde el CMS',
+    'token_error':    'el token del CMS está vencido o ilegible',
+    'gmail_error':    'falló la conexión con Gmail',
+    'supabase_error': 'falló la escritura en Supabase',
+    'config_error':   'falta configuración en el runner',
+    'unexpected':     'error inesperado',
+}
+
+
+def outcome_label(outcome) -> str:
+    """The Spanish description of a cycle outcome."""
+    key = (outcome or '').strip()
+    return _OUTCOME_LABEL.get(key, key or '?')
+
+
+def pattern_label(fingerprint) -> str:
+    """The Spanish name for a fingerprint.
+
+    An unknown key is humanised rather than passed through: the engine gains
+    detectors faster than this file gets updated, and 'Card fanout fast' reads
+    as an oversight while `card_fanout_fast` reads as a bug.
+    """
+    fp = (fingerprint or '').strip()
+    if fp in _PATTERN_LABEL:
+        return _PATTERN_LABEL[fp]
+    return fp.replace('_', ' ').capitalize() if fp else '?'
+
+
+def tier_label(confidence) -> str:
+    """Critical -> Crítico. Monitor is already the same word in both."""
+    return _TIER_LABEL.get(confidence, confidence or '?')
+
+
 def _finding_line(event, country_code) -> str:
     # The country is on every line as well as in the header, because ops is
     # split by country and "is this mine?" should be answerable from any
@@ -180,7 +250,7 @@ def _finding_line(event, country_code) -> str:
     parts = [
         f'*{_KIND_LABEL.get(event["kind"], event["kind"])}* · '
         f'*{_esc(event["company_name"])}* · `{_esc(code)}`',
-        f'{tier}, puntaje {score if score is not None else "?"}'
+        f'{tier_label(tier)}, puntaje {score if score is not None else "?"}'
         + ('  ·  sin liquidación' if event.get('section') == 'zero_settlement'
            else f'  ·  exposición {_money(event.get("exposure"), event.get("currency"))}'),
     ]
@@ -188,7 +258,8 @@ def _finding_line(event, country_code) -> str:
         parts.append(f'_{_esc(event["detail"])}_')
     fingerprints = event.get('fingerprints') or []
     if fingerprints:
-        parts.append('`' + '` `'.join(_esc(f) for f in fingerprints[:6]) + '`')
+        parts.append(' · '.join(_esc(pattern_label(f))
+                                 for f in fingerprints[:6]))
     return _clip('\n'.join(parts), MAX_TEXT)
 
 
