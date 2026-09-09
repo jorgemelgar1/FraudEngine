@@ -149,6 +149,17 @@ SUPABASE_SERVICE_KEY = _env('SUPABASE_SERVICE_ROLE_KEY')
 RUN_BY_EMAIL = _env('RUNNER_EMAIL')
 
 
+# ── Gmail ────────────────────────────────────────────────────────────────────
+# From a Google Cloud OAuth client of type "Desktop app". Neither value is
+# really secret - a desktop client ships both inside the distributed binary,
+# which is why the flow uses PKCE - but they still stay out of this
+# repository. The refresh token, which IS a credential, is never in .env: it
+# lives beside the CMS token, protected the same way.
+
+GMAIL_CLIENT_ID = _env('GMAIL_CLIENT_ID')
+GMAIL_CLIENT_SECRET = _env('GMAIL_CLIENT_SECRET')
+
+
 # ── Startup validation ───────────────────────────────────────────────────────
 
 # Grouped so each entry point demands only what it actually uses. Manual-URL
@@ -173,6 +184,10 @@ GROUPS = {
     'supabase': [
         ('NEXT_PUBLIC_SUPABASE_URL', SUPABASE_URL),
         ('SUPABASE_SERVICE_ROLE_KEY', SUPABASE_SERVICE_KEY),
+    ],
+    'gmail': [
+        ('GMAIL_CLIENT_ID', GMAIL_CLIENT_ID),
+        ('GMAIL_CLIENT_SECRET', GMAIL_CLIENT_SECRET),
     ],
 }
 

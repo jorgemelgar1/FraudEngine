@@ -25,11 +25,19 @@ from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..'))
+
+# Before importing config (via run), which snapshots the environment at import
+# time. Keeps these tests off the real state file on a machine that has one.
+import tempfile  # noqa: E402
+os.environ['RUNNER_STATE_DIR'] = tempfile.mkdtemp(prefix='runner-sync-test-')
+
 for _p in (_ROOT, os.path.join(_ROOT, 'runner')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import config                         # noqa: E402
 import dedup                          # noqa: E402
+import state as runner_state          # noqa: E402
 import runner.run as run              # noqa: E402
 
 
@@ -391,6 +399,78 @@ def test_migration_expression_matches_python():
     company, section = '  Inversiones Kabu ', 'zero_settlement'
     assert dedup.finding_key(company, section) == (
         company.strip().lower() + '|' + section.strip().lower())
+
+
+# ── Attribution and progress ─────────────────────────────────────────────────
+
+def test_country_comes_from_the_csv_not_from_the_request():
+    """PLAN.md principle 4. The country is read from the file's own
+    country_name column, so asking for the wrong country id produces a
+    mislabelled REQUEST, never a mislabelled analysis."""
+    assert run.country_code_of(_report()) == 'GT'          # 'guatemala'
+    for source, code in (('panama', 'PA'), ('el salvador', 'SV')):
+        report = _report()
+        report['summary']['currency_source'] = source
+        assert run.country_code_of(report) == code, source
+
+
+def test_unknown_country_yields_none_rather_than_a_guess():
+    report = _report()
+    report['summary']['currency_source'] = 'costa rica'
+    assert run.country_code_of(report) is None
+    report['summary']['currency_source'] = None
+    assert run.country_code_of(report) is None
+
+
+def test_progress_is_recorded_after_a_successful_run():
+    path = config.state_path()
+    if os.path.exists(path):
+        os.remove(path)
+
+    source = run.Source('/tmp/x.csv', delete_after=True, message_id='msg-42')
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        run._record_progress(source, _report())
+
+    saved = runner_state.load()
+    assert runner_state.is_processed('msg-42', saved), (
+        'the email must be marked consumed, or the next run re-processes it')
+    assert runner_state.last_success('GT', saved) is not None
+
+
+def test_progress_without_an_email_still_records_the_country():
+    """A --url or --csv run has no message to mark, but it still proves that
+    country is alive - which is what distinguishes a quiet week from an
+    outage."""
+    path = config.state_path()
+    if os.path.exists(path):
+        os.remove(path)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        run._record_progress(run.Source('/tmp/x.csv'), _report())
+
+    saved = runner_state.load()
+    assert runner_state.last_success('GT', saved) is not None
+    assert saved['processed_ids'] == []
+
+
+def test_unknown_country_warns_rather_than_recording_the_wrong_one():
+    path = config.state_path()
+    if os.path.exists(path):
+        os.remove(path)
+
+    report = _report()
+    report['summary']['currency_source'] = 'atlantis'
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        run._record_progress(run.Source('/tmp/x.csv', message_id='m'), report)
+
+    assert 'no se pudo determinar el país' in buf.getvalue()
+    saved = runner_state.load()
+    assert saved['last_success'] == {}
+    assert runner_state.is_processed('m', saved), (
+        'the email was still consumed - re-reading it would not help')
 
 
 def test_runner_writes_currency_source():

@@ -1,15 +1,19 @@
-"""Manual-URL mode: analyze one report CSV and sync its findings.
+"""Analyze one report CSV and sync its findings.
 
+    python runner/run.py --from-email              # newest unread report
     python runner/run.py --url "<link from the report email>"
     python runner/run.py --csv  path/to/report.csv
-    python runner/run.py --url "<link>" --dry-run
+    python runner/run.py --from-email --dry-run
 
-This is step 4 of runner/PLAN.md and the whole back half of the pipeline:
-download -> analyze -> de-duplicate -> write -> delete. The only thing it does
-not do is read your mailbox, which is step 5. Paste the link yourself and
-everything after it is already automatic.
+The back half of the pipeline: find or fetch -> analyze -> de-duplicate ->
+write -> delete. `--from-email` needs a one-time `runner/gmail.py --authorize`;
+`--url` needs nothing but the link, because the link is unauthenticated.
 
-Two guarantees this file is responsible for:
+What is still missing for a fully unattended cycle is the part that ASKS for a
+report (runner/cubo_api.py:trigger_report, which needs the CMS token) and a
+scheduler to call it on the hour.
+
+Three guarantees this file is responsible for:
 
   1. **No CSV survives a run.** Deletion is in a `finally`, so it happens even
      when the analysis throws - which is exactly when a half-written file would
@@ -19,6 +23,10 @@ Two guarantees this file is responsible for:
      of the link is authorization to download a full transaction export. It is
      printed only through cubo_api.redact_url(), and never appears in an
      exception message.
+
+  3. **Progress is recorded only after a run genuinely succeeds.** Marking an
+     email consumed before the analysis worked would silently discard a
+     report; recording a country's success too early would hide an outage.
 
 Exit codes: 0 success, 1 failure. The scheduler reads them.
 """
@@ -43,6 +51,7 @@ for _p in (_HERE, _ROOT):
 import config          # noqa: E402
 import cubo_api        # noqa: E402
 import dedup           # noqa: E402
+import state as runner_state   # noqa: E402
 import supabase_io     # noqa: E402
 
 
@@ -94,28 +103,58 @@ def log(msg=''):
 
 # ── Step 1: get a CSV ────────────────────────────────────────────────────────
 
-def acquire_csv(args):
-    """Return (csv_path, filename_for_the_audit_row, delete_after).
+class Source:
+    """Where this run's CSV came from.
 
-    `delete_after` is False for --csv: that file belongs to the user and
+    `delete_after` is False for --csv: that file belongs to the user, and
     deleting their input because they asked us to read it would be wrong.
+    `message_id` is set only when the link came from an email, so the message
+    can be marked consumed once the run actually succeeds.
     """
-    if args.csv:
-        path = os.path.abspath(args.csv)
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f'No such CSV: {path}')
-        return path, os.path.basename(path), False
 
+    __slots__ = ('path', 'filename', 'delete_after', 'message_id')
+
+    def __init__(self, path, filename=None, delete_after=False, message_id=None):
+        self.path = path
+        self.filename = filename
+        self.delete_after = delete_after
+        self.message_id = message_id
+
+
+def _download(url: str) -> str:
     os.makedirs(config.work_dir(), exist_ok=True)
     # Named from a fresh uuid, never from the URL: the URL is the credential,
     # and a filename built from it would leak into directory listings, error
     # messages and backups.
     dest = os.path.join(config.work_dir(), f'report-{uuid.uuid4().hex}.csv')
-
-    log(f'Descargando {cubo_api.redact_url(args.url)}')
-    written = cubo_api.download_csv(args.url, dest)
+    log(f'Descargando {cubo_api.redact_url(url)}')
+    written = cubo_api.download_csv(url, dest)
     log(f'  {written:,} bytes')
-    return dest, None, True
+    return dest
+
+
+def acquire_csv(args) -> Source:
+    if args.csv:
+        path = os.path.abspath(args.csv)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f'No such CSV: {path}')
+        return Source(path, os.path.basename(path), delete_after=False)
+
+    if args.from_email:
+        import gmail  # noqa: PLC0415  (only this mode needs the OAuth stack)
+
+        log('Buscando el reporte más reciente en el correo...')
+        found = gmail.find_report(skip_processed=True)
+        if not found:
+            raise cubo_api.CmsError(
+                'No hay ningún correo de reporte sin procesar. Pide un '
+                'reporte nuevo, o usa --url con un enlace concreto.')
+        message_id, url, received = found
+        when = f'{received:%Y-%m-%d %H:%M} UTC' if received else 'sin fecha'
+        log(f'  mensaje {message_id} ({when})')
+        return Source(_download(url), delete_after=True, message_id=message_id)
+
+    return Source(_download(args.url), delete_after=True)
 
 
 # ── Step 2: analyze ──────────────────────────────────────────────────────────
@@ -246,6 +285,58 @@ def sync(findings: dict, run_id: str, dry_run: bool = False) -> dict:
     return dedup.summarize(decisions)
 
 
+# ── Step 4: remember what happened ───────────────────────────────────────────
+
+def country_code_of(findings: dict):
+    """Which country this CSV was for, as SV / PA / GT, or None.
+
+    Derived from `currency_source`, which analyze.py sets from the
+    `country_name` column - the file itself, never the report we asked for.
+    A mislabelled request therefore cannot produce a mislabelled run.
+
+    Uses the engine's own normalizer rather than a second copy of it, so the
+    two can never disagree about what 'Panamá' folds to.
+    """
+    source = (findings.get('summary') or {}).get('currency_source')
+    if not source:
+        return None
+    for code, meta in config.COUNTRIES.items():
+        if fraud_engine._normalize_country(meta['name']) == source:
+            return code
+    return None
+
+
+def _record_progress(source: Source, findings: dict):
+    """Mark the email consumed and record that this country succeeded.
+
+    Both happen only after a run genuinely finished. Marking a message
+    processed before the analysis worked would silently discard a report; and
+    a country's last-success time is the only thing that distinguishes "a
+    quiet week" from "the runner has been dead for a week".
+    """
+    st = runner_state.load()
+    changed = False
+
+    if source.message_id:
+        st = runner_state.mark_processed(source.message_id, st)
+        changed = True
+
+    code = country_code_of(findings)
+    if code:
+        st = runner_state.record_success(code, state=st)
+        changed = True
+    else:
+        log('AVISO: no se pudo determinar el país del CSV; no se registra '
+            'el avance de este país.')
+
+    if changed:
+        try:
+            runner_state.save(st)
+        except OSError as e:
+            # Bookkeeping. Losing it costs at most one duplicate report.
+            log(f'AVISO: no se pudo guardar el estado ({e}).')
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def parse_args(argv=None):
@@ -255,6 +346,8 @@ def parse_args(argv=None):
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument('--url', help='CSV link from the report email')
     src.add_argument('--csv', help='local CSV file (not deleted afterwards)')
+    src.add_argument('--from-email', action='store_true',
+                     help='find the newest unprocessed report in Gmail')
     p.add_argument('--dry-run', action='store_true',
                    help='analyze and show the de-dup decisions, write nothing')
     p.add_argument('--source', default='auto', choices=['auto', 'manual'],
@@ -265,18 +358,21 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
 
-    # Only what this mode actually uses. Manual-URL mode never touches the CMS
-    # API and needs no token: the report link is unauthenticated.
-    needed = ['supabase'] if args.csv else ['url', 'supabase']
+    # Only what this mode actually uses. Neither URL mode touches the CMS API
+    # or needs a CMS token: the report link is unauthenticated.
+    needed = ['supabase']
+    if args.url or args.from_email:
+        needed.append('url')
+    if args.from_email:
+        needed += ['gmail', 'mail']
     config.validate(*needed)
 
-    csv_path = None
-    delete_after = False
+    source = None
     staging = tempfile.mkdtemp(prefix='cubo-runner-')
 
     try:
-        csv_path, filename, delete_after = acquire_csv(args)
-        findings = run_analysis(csv_path, staging)
+        source = acquire_csv(args)
+        findings = run_analysis(source.path, staging)
         log('Análisis completo:')
         print(describe(findings))
 
@@ -288,7 +384,7 @@ def main(argv=None) -> int:
         else:
             run_id = supabase_io.insert_run(
                 findings['summary'],
-                filename or audit_filename(findings),
+                source.filename or audit_filename(findings),
                 source=args.source)
             log(f'Run registrado: {run_id}')
 
@@ -296,6 +392,7 @@ def main(argv=None) -> int:
 
         if not args.dry_run:
             supabase_io.record_indicator_hits(findings)
+            _record_progress(source, findings)
 
         log()
         log(f'nuevos {counts[dedup.INSERT]} · '
@@ -322,13 +419,13 @@ def main(argv=None) -> int:
     finally:
         # Runs even when the analysis threw - which is exactly when a
         # half-processed file would otherwise be left on disk.
-        if delete_after and csv_path and os.path.exists(csv_path):
+        if source and source.delete_after and os.path.exists(source.path):
             try:
-                os.remove(csv_path)
+                os.remove(source.path)
                 log('CSV eliminado.')
             except OSError as e:
                 log(f'AVISO: no se pudo borrar el CSV ({e}). Bórralo a mano: '
-                    f'{csv_path}')
+                    f'{source.path}')
         shutil.rmtree(staging, ignore_errors=True)
 
 

@@ -260,8 +260,12 @@ the runner is live and the volume of retained findings grows.
    — `runner/dedup.py`, 28 tests.
 4. ~~**Manual-URL mode**~~ **Done** — `runner/run.py`, 16 tests plus an
    end-to-end pass over the real engine.
-5. **Gmail reader** — OAuth, stored refresh token, label-scoped polling.
-6. **Scheduler** — cron on the Pi, hourly, rotation by `hour % 3`.
+5. ~~**Gmail reader** — OAuth, stored refresh token, label-scoped polling.~~
+   **Done** — `runner/gmail.py` + `runner/report_mail.py` + `runner/state.py`,
+   42 tests. Stdlib only: OAuth is a form POST and reading a message is a GET,
+   so no `google-api-python-client`.
+6. **Trigger + scheduler** — `trigger_report()` exists but nothing calls it;
+   needs the CMS token on the Pi, then cron hourly with rotation by `hour % 3`.
 7. **UI additions** — `times_seen`, `source`.
 
 Steps 1–4 are useful on their own, and now exist: you can analyze any report
@@ -277,15 +281,31 @@ Manual-URL mode reads only the Supabase block and `CUBO_CSV_URL_PATTERN` — no
 CMS token is involved, because the report link is unauthenticated.
 
 ```bash
-# Analyze a report link from the email
-python runner/run.py --url "<link from the report email>"
+# One time: authorize Gmail (read-only scope)
+python3 runner/gmail.py --authorize
+python3 runner/gmail.py --check
+
+# Find and analyze the newest unprocessed report email
+python3 runner/run.py --from-email
 
 # See what it WOULD do, writing nothing
-python runner/run.py --url "<link>" --dry-run
+python3 runner/run.py --from-email --dry-run
 
-# Analyze a CSV you already have (this file is never deleted)
-python runner/run.py --csv ~/reports/guatemala.csv
+# Or skip the mailbox entirely and paste a link
+python3 runner/run.py --url "<link from the report email>"
+
+# Or analyze a CSV you already have (this file is never deleted)
+python3 runner/run.py --csv ~/reports/guatemala.csv
+
+# What has the runner actually managed to do?
+python3 runner/state.py
 ```
+
+**The OAuth app must be published as "In production."** While it sits in
+"Testing", Google expires the refresh token after 7 days, so the runner would
+stop every week with an `invalid_grant` that looks like nothing in particular.
+`gmail.py` names this specifically when it sees that error, because it is by
+far the most likely way this breaks.
 
 Output is one line per finding with the de-dup decision that was made and why:
 
