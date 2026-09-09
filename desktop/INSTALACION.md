@@ -65,6 +65,15 @@ acepta. Solo se pregunta la primera vez.
   agrega el merchant a la watchlist, Descartar lo deja como falso positivo.
 - **Historial:** consulta decisiones anteriores. Tienes 24 horas para
   deshacer una decisión.
+- **Runner:** el estado del robot que pide y analiza los reportes solo, cada
+  hora, rotando entre El Salvador, Panamá y Guatemala. Arriba dice de un
+  vistazo si está al día; abajo está cada ciclo, con sus hallazgos si
+  encontró algo y con el error y su solución si falló. Es de solo lectura —
+  aceptar y descartar se sigue haciendo en **Pendientes**.
+
+En Pendientes verás que cada grupo de hallazgos ahora dice **Automático** o
+**Manual**: los primeros los generó el runner, los segundos los subió una
+persona.
 
 ## Modo sin conexión
 
