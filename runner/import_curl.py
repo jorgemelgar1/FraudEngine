@@ -48,58 +48,146 @@ class CurlError(RuntimeError):
 # ── Parsing ──────────────────────────────────────────────────────────────────
 
 def _normalize(text: str) -> str:
-    """Join the line continuations every browser adds, in either dialect."""
+    """Join the line continuations every browser adds, in either dialect.
+
+    A continuation backslash that survives into shlex is not harmless: with
+    posix=True a lone `\\` escapes the following space, so `\\ -H` becomes the
+    single token ` -H` and every header silently stops being recognised. So
+    any backslash or caret acting as a separator is removed here, whether or
+    not a newline followed it - a wrapped or re-joined paste has the same
+    backslashes and no newlines at all.
+    """
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    text = re.sub(r'\\\n', ' ', text)      # bash / macOS
-    text = re.sub(r'\^\n', ' ', text)      # cmd.exe
+    text = re.sub(r'\\\n', ' ', text)          # bash / macOS
+    text = re.sub(r'\^\n', ' ', text)          # cmd.exe
+    text = re.sub(r'`\n', ' ', text)           # PowerShell
+
+    # cmd.exe dialect. Chrome escapes every character cmd would otherwise act
+    # on: quotes become ^", ampersands ^&, and % is doubled. Left in place the
+    # header name arrives as `^authorization` and the lookup for
+    # `authorization` fails - while the token is plainly visible in what was
+    # pasted. The stray ^ also rides along inside query values, so
+    # `countryId=3^` no longer matches the path segment `3` and the country
+    # cannot be substituted.
+    if '^"' in text or re.search(r'\^[&|<>]', text):
+        text = re.sub(r'\^([&|<>()^"])', r'\1', text)
+        text = text.replace('%%', '%')
+
+    text = re.sub(r'(?<!\S)[\\^`](?=\s|$)', ' ', text)   # a stray separator
     return ' '.join(text.split())
 
 
+# Fallbacks for when tokenization does not produce what we need. cURL comes in
+# several dialects (bash, cmd, PowerShell) and browsers change their output;
+# a regex over the raw text does not care which one it is.
+_HEADER_RE = re.compile(
+    r"""(?:-H|--header)\s*(?:(?P<q>['"])(?P<qname>[^:'"]+?):\s*(?P<qvalue>.*?)(?P=q)"""
+    r"""|(?P<name>[A-Za-z0-9-]+):\s*(?P<value>\S+))""",
+    re.S,
+)
+
+_URL_RE = re.compile(r"""https?://[^\s'"^\\]+""")
+
+# Deliberately permissive about the token's alphabet: it may be a JWT or an
+# opaque string, and rejecting a valid one is worse than accepting a wrong one
+# (which fails immediately and visibly with a 401).
+_BEARER_RE = re.compile(r'[Bb]earer\s+([A-Za-z0-9._~+/=-]{20,})')
+
+
+def _headers_by_regex(text: str) -> dict:
+    found = {}
+    for match in _HEADER_RE.finditer(text):
+        name = match.group('qname') or match.group('name')
+        value = match.group('qvalue') or match.group('value') or ''
+        if name:
+            found.setdefault(name.strip().strip('^`').lower(),
+                             value.strip().strip('^`'))
+    return found
+
+
 def parse_curl(text: str) -> dict:
-    """Return {'url': str, 'headers': {lowercased name: value}}."""
+    """Return {'url', 'headers', 'strategy'} from a pasted cURL.
+
+    `strategy` records how the headers were found, so `--show-headers` can
+    say which path worked rather than leaving a failure unexplainable.
+    """
     text = _normalize(text)
-    if 'curl' not in text:
+    if 'curl' not in text.lower():
         raise CurlError(
             'That does not look like a cURL command. In the browser: F12 -> '
             'Network -> right-click the request -> Copy -> Copy as cURL.')
 
     try:
         tokens = shlex.split(text, posix=True)
-    except ValueError as e:
-        raise CurlError(f'Could not read the command ({e}).') from None
+    except ValueError:
+        # An unbalanced quote somewhere - the regex path handles it.
+        tokens = []
 
     url, headers = None, {}
     i = 0
     while i < len(tokens):
-        token = tokens[i]
+        # .strip() because an escaped space can still glue whitespace onto a
+        # flag; without it the comparison below fails on ' -H'.
+        token = tokens[i].strip()
         if token in ('-H', '--header') and i + 1 < len(tokens):
             name, _, value = tokens[i + 1].partition(':')
-            headers[name.strip().lower()] = value.strip()
+            # .strip('^` ') in case a dialect's escape character survived
+            # normalization: a name of '^authorization' silently matches
+            # nothing, which is exactly how this failed the first time.
+            headers[name.strip().strip('^`').lower()] = value.strip().strip('^`')
             i += 2
             continue
-        if token in ('--url',) and i + 1 < len(tokens):
-            url = tokens[i + 1]
+        if token == '--url' and i + 1 < len(tokens):
+            url = tokens[i + 1].strip()
             i += 2
             continue
-        # Chrome puts the URL as the first bare argument after `curl`.
-        if url is None and token.startswith('http'):
-            url = token
+        if url is None and token.strip('^`').startswith('http'):
+            url = token.strip('^`')
         i += 1
 
+    strategy = 'shlex'
+    if 'authorization' not in headers:
+        recovered = _headers_by_regex(text)
+        if 'authorization' in recovered:
+            strategy = 'regex'
+        for name, value in recovered.items():
+            headers.setdefault(name, value)
+
+    if not url:
+        match = _URL_RE.search(text)
+        url = match.group(0) if match else None
     if not url:
         raise CurlError('No URL found in that command.')
-    return {'url': url, 'headers': headers}
+
+    return {'url': url, 'headers': headers, 'strategy': strategy}
 
 
-def token_from_headers(headers: dict) -> str:
-    """The bearer token, cleaned. Raises if the capture was anonymous."""
-    raw = headers.get('authorization') or headers.get('Authorization') or ''
+def token_from_headers(headers: dict, raw_text: str = None) -> str:
+    """The bearer token, cleaned.
+
+    Falls back to scanning the raw text for `Bearer <something>`: the token
+    being visible in the paste while the parser cannot see it is a
+    tokenization problem, not a missing credential, and the user should not
+    have to care which.
+    """
+    raw = headers.get('authorization') or ''
     token = token_store._clean(raw)
+
+    if not token and raw_text:
+        match = _BEARER_RE.search(raw_text)
+        if match:
+            token = token_store._clean(match.group(1))
+
     if not token:
         raise CurlError(
-            'That request carried no Authorization header, so there is no '
-            'token in it. Copy a request made while logged in - the report '
-            'request itself is the right one.')
+            'No Authorization header found in that request.\n'
+            '  If you can see a bearer token in what you pasted, this is a '
+            'parsing problem - run\n'
+            '    python3 runner/import_curl.py --show-headers\n'
+            '  and send me the output.\n'
+            '  Otherwise the request was made while logged out; copy the '
+            'report request itself.')
+
     if len(token) < 40:
         raise CurlError(
             f'The token in that request is only {len(token)} characters, '
@@ -169,7 +257,7 @@ def origins_from_headers(headers: dict, api_root: str) -> dict:
 def settings_from_curl(text: str) -> tuple:
     """(settings dict, token, notes list) from a pasted cURL."""
     parsed = parse_curl(text)
-    token = token_from_headers(parsed['headers'])
+    token = token_from_headers(parsed['headers'], raw_text=text)
 
     shape = templatize(parsed['url'])
     settings = {
@@ -259,6 +347,45 @@ def read_input(file_path: str = None) -> str:
     return sys.stdin.read()
 
 
+def show_headers(text: str) -> int:
+    """List what the parser actually saw. Credential values are redacted.
+
+    Exists because "I can see the token but the tool says there is none" is
+    unanswerable without knowing which headers were recognised and how. cURL
+    has three dialects and browsers change their output; guessing is slower
+    than looking.
+    """
+    try:
+        parsed = parse_curl(text)
+    except CurlError as e:
+        print(f'\nERROR: {e}')
+        return 1
+
+    print()
+    print(f'Dialecto detectado por: {parsed["strategy"]}')
+    print(f'URL: {parsed["url"][:100]}')
+    print()
+    print('Cabeceras encontradas:')
+    if not parsed['headers']:
+        print('  (ninguna)')
+    for name in sorted(parsed['headers']):
+        value = parsed['headers'][name]
+        if name in ('authorization', 'cookie', 'x-api-key'):
+            shown = f'<{len(value)} caracteres, oculto>'
+        else:
+            shown = value[:60]
+        print(f'  {name}: {shown}')
+
+    print()
+    try:
+        token = token_from_headers(parsed['headers'], raw_text=_normalize(text))
+        print(f'Token: {token_store.fingerprint(token)}')
+    except CurlError as e:
+        print(f'Token: NO ENCONTRADO\n  {e}')
+        return 1
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog='runner/import_curl.py',
@@ -266,7 +393,12 @@ def main(argv=None) -> int:
     parser.add_argument('--file', help='read the cURL from a file')
     parser.add_argument('--dry-run', action='store_true',
                         help='show what would be set, change nothing')
+    parser.add_argument('--show-headers', action='store_true',
+                        help='list the headers found, values redacted')
     args = parser.parse_args(argv)
+
+    if args.show_headers:
+        return show_headers(read_input(args.file))
 
     try:
         settings, token, notes = settings_from_curl(read_input(args.file))

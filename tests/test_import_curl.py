@@ -50,6 +50,86 @@ def test_windows_line_continuations_are_handled():
     assert parsed['url'].startswith('https://api.example.internal/')
 
 
+# ── Dialects: the failure this file's author actually hit ────────────────────
+
+# Chrome's "Copy as cURL (cmd)". Every argument is wrapped ^"..."^ because cmd
+# needs ^ to escape a quote, and % is doubled. Parsed naively the header name
+# becomes '^authorization', so the lookup for 'authorization' finds nothing -
+# while the token is plainly visible in what was pasted. That exact confusion
+# cost a round trip, hence this test.
+CURL_CMD = (
+    'curl ^"https://api.example.internal/api/v1/cms/3/transactions/report'
+    '?createdAt=2026-09-08^&countryId=3^&depositStatusFilter=ALL^" ^\n'
+    '  -H ^"accept: */*^" ^\n'
+    f'  -H ^"authorization: Bearer {TOKEN}^" ^\n'
+    '  -H ^"origin: https://cms.example.internal^" ^\n'
+    '  -H ^"referer: https://cms.example.internal/^" ^\n'
+    '  --compressed'
+)
+
+# Chrome's "Copy as cURL (PowerShell)": backtick continuations, curl.exe.
+CURL_PS = (
+    'curl.exe "https://api.example.internal/api/v1/cms/3/transactions/report'
+    '?countryId=3" `\n'
+    '  -H "accept: */*" `\n'
+    f'  -H "authorization: Bearer {TOKEN}" `\n'
+    '  -H "origin: https://cms.example.internal" `\n'
+    '  -H "referer: https://cms.example.internal/"'
+)
+
+
+def test_cmd_dialect_finds_the_authorization_header():
+    """The regression. The token was visible and the parser said there was
+    none, because the header was named '^authorization'."""
+    parsed = import_curl.parse_curl(CURL_CMD)
+    assert 'authorization' in parsed['headers'], parsed['headers']
+    assert import_curl.token_from_headers(parsed['headers']) == TOKEN
+
+
+def test_cmd_dialect_end_to_end():
+    settings, token, _notes = import_curl.settings_from_curl(CURL_CMD)
+    assert token == TOKEN
+    assert settings['CUBO_API_ROOT'] == 'https://api.example.internal'
+    assert settings['CUBO_REPORT_PATH'] == \
+        '/api/v1/cms/{country_id}/transactions/report'
+    assert settings['CUBO_ORIGIN'] == 'https://cms.example.internal'
+
+
+def test_powershell_dialect_end_to_end():
+    settings, token, _notes = import_curl.settings_from_curl(CURL_PS)
+    assert token == TOKEN
+    assert settings['CUBO_REPORT_PATH'] == \
+        '/api/v1/cms/{country_id}/transactions/report'
+
+
+def test_a_paste_with_no_newlines_still_works():
+    """A wrapped or re-joined paste keeps the backslashes and loses the
+    newlines. Left in place, a lone backslash escapes the following space
+    under shlex and every header stops being recognised."""
+    joined = CURL.replace('\\\n', '\\ ')
+    parsed = import_curl.parse_curl(joined)
+    assert 'authorization' in parsed['headers'], parsed['headers']
+
+
+def test_bearer_is_recovered_from_raw_text_as_a_last_resort():
+    """If a future browser emits a dialect nobody predicted, seeing the token
+    in the paste and being told it is absent is the worst outcome."""
+    weird = f'curl --some-new-flag {{a}} https://api.example.internal/x/3/report' \
+            f'?countryId=3 --headers-somehow "Authorization=Bearer {TOKEN}"'
+    parsed = import_curl.parse_curl(weird)
+    assert import_curl.token_from_headers(
+        parsed['headers'], raw_text=weird) == TOKEN
+
+
+def test_percent_escaping_is_undone_for_cmd():
+    """cmd doubles % — leaving it doubled corrupts any URL-encoded value."""
+    text = ('curl ^"https://api.example.internal/api/1/cms/3/report'
+            '?countryId=3^&q=a%%20b^" ^\n'
+            f'  -H ^"authorization: Bearer {TOKEN}^"')
+    parsed = import_curl.parse_curl(text)
+    assert '%20' in parsed['url'] and '%%' not in parsed['url']
+
+
 def test_non_curl_input_is_explained():
     try:
         import_curl.parse_curl('https://api.example.internal/whatever')
@@ -72,7 +152,11 @@ def test_anonymous_request_is_refused():
     try:
         import_curl.token_from_headers({'origin': 'https://x'})
     except import_curl.CurlError as e:
-        assert 'no token' in str(e)
+        message = str(e)
+        assert 'No Authorization header' in message
+        # It must also offer the diagnostic, because "I can see the token"
+        # is the far more common cause than "I was logged out".
+        assert '--show-headers' in message
     else:
         raise AssertionError('a request with no Authorization must be refused')
 
