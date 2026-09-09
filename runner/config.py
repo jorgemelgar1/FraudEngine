@@ -151,25 +151,47 @@ RUN_BY_EMAIL = _env('RUNNER_EMAIL')
 
 # ── Startup validation ───────────────────────────────────────────────────────
 
-REQUIRED = [
-    ('CUBO_API_ROOT',        API_ROOT),
-    ('CUBO_REPORT_PATH',     REPORT_PATH),
-    ('CUBO_ORIGIN',          ORIGIN),
-    ('CUBO_REFERER',         REFERER),
-    ('CUBO_REPORT_SENDER',   REPORT_SENDER),
-    ('CUBO_CSV_URL_PATTERN', CSV_URL_PATTERN),
-]
+# Grouped so each entry point demands only what it actually uses. Manual-URL
+# mode needs no CMS credentials at all - the CDN link is unauthenticated - and
+# refusing to start without them would be a lie about what is required.
+
+GROUPS = {
+    'cms': [
+        ('CUBO_API_ROOT',    API_ROOT),
+        ('CUBO_REPORT_PATH', REPORT_PATH),
+        ('CUBO_ORIGIN',      ORIGIN),
+        ('CUBO_REFERER',     REFERER),
+    ],
+    'mail': [
+        ('CUBO_REPORT_SENDER', REPORT_SENDER),
+    ],
+    # Needed to *validate* a report link before fetching it, which is why it
+    # is separate from 'cms': downloading needs the pattern, not the API.
+    'url': [
+        ('CUBO_CSV_URL_PATTERN', CSV_URL_PATTERN),
+    ],
+    'supabase': [
+        ('NEXT_PUBLIC_SUPABASE_URL', SUPABASE_URL),
+        ('SUPABASE_SERVICE_ROLE_KEY', SUPABASE_SERVICE_KEY),
+    ],
+}
 
 
-def validate(require_supabase: bool = True):
+def validate(*groups: str):
     """Raise with a readable list of what is missing, rather than failing
-    later with a request to an empty URL."""
-    missing = [name for name, value in REQUIRED if not value]
-    if require_supabase:
-        if not SUPABASE_URL:
-            missing.append('NEXT_PUBLIC_SUPABASE_URL')
-        if not SUPABASE_SERVICE_KEY:
-            missing.append('SUPABASE_SERVICE_ROLE_KEY')
+    later with a request to an empty URL.
+
+        validate('url', 'supabase')     # manual-URL mode
+        validate('cms', 'mail', 'url', 'supabase')   # the full cycle
+
+    No arguments checks everything.
+    """
+    groups = groups or tuple(GROUPS)
+    missing = []
+    for group in groups:
+        if group not in GROUPS:
+            raise ValueError(f'Unknown config group {group!r}')
+        missing += [name for name, value in GROUPS[group] if not value]
     if missing:
         raise RuntimeError(
             'Missing configuration: ' + ', '.join(missing) + '\n'

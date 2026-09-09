@@ -45,3 +45,7 @@ dist/
 runner/work/
 runner/*.csv
 runner/.env
+# runner/setup_env.py keeps the previous file when you re-run it, and a
+# backup of a service-role key is exactly as dangerous as the original.
+runner/.env.backup
+*.env.backup

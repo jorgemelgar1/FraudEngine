@@ -35,6 +35,9 @@ type Findings = {
     total_suspicious_rejected_merchants?: number;
     estimated_chargeback_exposure?: number;
     currency?: string;
+    // Added by the v0.5.0 sidecar. Absent from runs produced by an older one,
+    // hence optional rather than defaulted.
+    currency_source?: string | null;
   };
   critical_findings?: Finding[];
   monitor_findings?: Finding[];
@@ -84,6 +87,12 @@ export async function syncFindings(
       zero_settlement_findings_count: summary.total_suspicious_rejected_merchants ?? null,
       chargeback_exposure_usd:      summary.estimated_chargeback_exposure ?? null,
       chargeback_exposure_currency: currency,
+      // The country the currency was derived from (migration 0009). Country
+      // reaches storage nowhere else, which is exactly why the four-month
+      // currency bug left nothing to diagnose from after the fact. Null for
+      // runs from a sidecar built before v0.5.0, which is honest — those runs
+      // genuinely did not record it.
+      currency_source:              summary.currency_source ?? null,
       summary:                      summary,
     })
     .select('id')

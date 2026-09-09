@@ -254,6 +254,11 @@ def insert_run_audit(user_id: str, email: str, csv_filename: str, findings: dict
         'zero_settlement_findings_count': summary.get('total_suspicious_rejected_merchants'),
         'chargeback_exposure_usd':       summary.get('estimated_chargeback_exposure'),
         'chargeback_exposure_currency':  summary.get('currency', 'USD'),
+        # The country the currency was derived from (migration 0009). Country
+        # reaches storage nowhere else, which is exactly why the four-month
+        # currency bug left nothing to diagnose from after the fact. A column
+        # nothing writes is worse than no column — it looks like evidence.
+        'currency_source':               summary.get('currency_source'),
         'summary':                       summary,
     }
     res = sb_rest('POST', 'analysis_runs',

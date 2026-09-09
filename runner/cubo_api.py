@@ -89,17 +89,17 @@ def trigger_report(token: str, country_id: int, date_from: str, date_to: str,
             404: f'No report endpoint for country id {country_id}.',
             429: 'Rate limited - too many report requests.',
         }.get(e.code, 'Unexpected status.')
-        raise CmsError(f'Report request failed (HTTP {e.code}). {hint}')
+        raise CmsError(f'Report request failed (HTTP {e.code}). {hint}') from None
     except urllib.error.URLError as e:
-        raise CmsError(f'Could not reach the CMS API: {e.reason}')
+        raise CmsError(f'Could not reach the CMS API: {e.reason}') from None
 
 
 def extract_csv_url(text: str) -> str:
     """Pull the direct CDN link out of an email body.
 
-    Deliberately does NOT follow the SendGrid tracking wrapper: that would
-    register a click, add a dependency on a third party staying up, and the
-    direct URL is available in the plain-text part anyway.
+    Deliberately does NOT follow the mail provider's tracking wrapper: that
+    would register a click, add a dependency on a third party staying up,
+    and the direct URL is available in the plain-text part anyway.
     """
     if not text:
         return None
@@ -134,9 +134,9 @@ def download_csv(url: str, dest_path: str, timeout: int = 300) -> int:
                 written += len(chunk)
     except urllib.error.HTTPError as e:
         # Note the absence of `url` here - it is a credential.
-        raise CmsError(f'CSV download failed (HTTP {e.code}).')
+        raise CmsError(f'CSV download failed (HTTP {e.code}).') from None
     except urllib.error.URLError as e:
-        raise CmsError(f'CSV download failed: {e.reason}')
+        raise CmsError(f'CSV download failed: {e.reason}') from None
 
     if written == 0:
         raise CmsError('CSV download produced an empty file.')

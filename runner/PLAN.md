@@ -177,7 +177,7 @@ consecutive runs is not.
 ### `analyze.py`
 - Currency fix (prerequisite above). **Nothing else.**
 
-### Database — one migration (0009)
+### Database — migrations 0010 and 0011
 ```
 findings_history
   + finding_key       text          stable identity for re-detection
@@ -189,8 +189,25 @@ findings_history
 analysis_runs
   + source            text          'manual' | 'auto'
 
-RPC upsert_finding(...)               insert-or-update atomically
+RPC lookup_open_finding(key)          the current row for a key, or nothing
+RPC touch_finding(id, row, promote)   refresh an open finding in place
+RPC reopen_finding(id, ...)           a rejected finding that escalated
+RPC touch_watchlist_merchant(...)     "still happening" on a suppressed alert
 ```
+
+**0011 exists because 0010 was not enough.** It added `finding_key` but nothing
+*populated* it: three clients write findings (the web app, the desktop app, the
+runner) and none of them sent the column, so every finding created after 0010
+had `finding_key = NULL` — invisible to `lookup_open_finding`, and therefore
+re-raised as new on every single run. Fixing that in three clients means three
+chances to drift, so 0011 makes the column **`GENERATED`**: Postgres computes it
+on every write and no client can supply, forget, or disagree about it.
+
+0011 also widens `touch_finding` to refresh the *whole* finding rather than four
+columns of it. The 0010 version left `chargeback_exposure_usd`, `description_es`
+and `run_id` at their first-detection values, so a reviewer would have seen a
+current risk score beside a two-day-old amount with no way to tell which was
+which.
 
 `source` matters for trust: when a number looks odd, being able to tell your
 own upload from the robot's run is the first debugging question.
@@ -237,19 +254,53 @@ the runner is live and the volume of retained findings grows.
 
 ## Build order
 
-1. **Currency fix** + guard test. Prerequisite.
-2. **Migration 0009** — dedup columns and the upsert RPC.
-3. **De-duplication logic** + tests against synthetic repeated runs. This is the
-   piece most worth testing hard; everything else is plumbing.
-4. **Manual-URL mode** — paste a link, runner does download → analyze → dedupe
-   → sync. Proves the whole back half with no OAuth setup.
+1. ~~**Currency fix** + guard test.~~ **Done**, shipped in v0.5.0.
+2. ~~**Migrations 0010 + 0011** — dedup columns, generated key, RPCs.~~ **Done.**
+3. ~~**De-duplication logic** + tests against synthetic repeated runs.~~ **Done**
+   — `runner/dedup.py`, 28 tests.
+4. ~~**Manual-URL mode**~~ **Done** — `runner/run.py`, 16 tests plus an
+   end-to-end pass over the real engine.
 5. **Gmail reader** — OAuth, stored refresh token, label-scoped polling.
-6. **Scheduler** — Windows Scheduled Task, hourly, rotation by `hour % 3`.
+6. **Scheduler** — cron on the Pi, hourly, rotation by `hour % 3`.
 7. **UI additions** — `times_seen`, `source`.
 
-Steps 1–4 are useful on their own: at step 4 you have a working tool that
-analyzes any report link you paste, which is already better than exporting and
-uploading by hand.
+Steps 1–4 are useful on their own, and now exist: you can analyze any report
+link you paste, which is already better than exporting and uploading by hand.
+
+---
+
+## Running it today (steps 1–4)
+
+**Once:** apply `supabase/migrations/0011_finding_key_generated.sql` in the
+Supabase SQL Editor, and create `runner/.env` from `runner/.env.example`.
+Manual-URL mode reads only the Supabase block and `CUBO_CSV_URL_PATTERN` — no
+CMS token is involved, because the report link is unauthenticated.
+
+```bash
+# Analyze a report link from the email
+python runner/run.py --url "<link from the report email>"
+
+# See what it WOULD do, writing nothing
+python runner/run.py --url "<link>" --dry-run
+
+# Analyze a CSV you already have (this file is never deleted)
+python runner/run.py --csv ~/reports/guatemala.csv
+```
+
+Output is one line per finding with the de-dup decision that was made and why:
+
+```
+insert   Inversiones Kabu [exposure]: primera detección
+update   Mandados SV [exposure]: ya pendiente, visto de nuevo (puntaje 45 → 90)
+suppress Comercio Tres [exposure]: descartado, en silencio 31h más
+```
+
+Findings land in Pendientes for the whole team, tagged `source = auto`.
+
+**Two things this deliberately refuses to do:** download anything whose URL does
+not match `CUBO_CSV_URL_PATTERN` (a malformed or spoofed email must not turn the
+runner into a fetch-anything tool), and leave a downloaded CSV on disk — that
+happens in a `finally`, so it survives a crash mid-analysis.
 
 ---
 
