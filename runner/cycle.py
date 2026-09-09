@@ -193,6 +193,10 @@ def show_request(country: str = None, lookback_days: int = None) -> int:
 # needs nothing stored to remember whether it already sent one.
 TOKEN_ALERT_HOUR = 9
 
+# And the review-queue nudge, an hour later so the two never land together as
+# a wall of bot messages at the same minute.
+QUEUE_ALERT_HOUR = 10
+
 
 def alert_failure_streak(country: str, outcome: str):
     """Tell Slack when a country has stopped working, once.
@@ -250,6 +254,35 @@ def alert_token_expiry(token: str, now: datetime = None):
         level='warn')
 
 
+def alert_pending_queue(now: datetime = None):
+    """One reminder a day about the review queue.
+
+    Same fixed-hour trick as the token warning, for the same reason: the runner
+    wakes 24 times a day, and a nudge repeated 24 times a day is not a nudge.
+    Sending it from the hourly job rather than adding a second cron line keeps
+    the schedule to one entry someone has to understand.
+    """
+    now = now or datetime.now()
+    if now.hour != QUEUE_ALERT_HOUR or not config.slack_enabled():
+        return
+
+    pending, oldest = supabase_io.pending_summary()
+    if not pending:
+        return
+
+    days = None
+    if oldest:
+        try:
+            when = datetime.fromisoformat(str(oldest).replace('Z', '+00:00'))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            days = (datetime.now(timezone.utc) - when).total_seconds() / 86400
+        except (TypeError, ValueError):
+            days = None
+
+    slack.send_queue_reminder(pending, days)
+
+
 def token_expiry_iso():
     """The CMS token's expiry as an ISO string, or None if unreadable.
 
@@ -287,6 +320,7 @@ def run_cycle(country: str, dry_run: bool = False,
 
     token = check_token()
     alert_token_expiry(token)
+    alert_pending_queue()
 
     # Everything from here is timed against `requested_at`. A report that
     # arrived BEFORE we asked belongs to an earlier cycle; consuming it would

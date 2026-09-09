@@ -287,6 +287,37 @@ def build_findings_message(country_code, events, summary=None,
     return {'text': fallback, 'blocks': blocks[:MAX_BLOCKS]}
 
 
+def build_queue_message(pending, oldest_days=None):
+    """The daily nudge, or None when there is nothing to nudge about.
+
+    An empty queue produces silence. A cheerful "0 pendientes" every morning is
+    how a channel becomes background noise, and then the message that matters
+    arrives somewhere nobody looks.
+    """
+    if not pending:
+        return None
+
+    plural = pending != 1
+    headline = (f'{pending} comercio{"s" if plural else ""} '
+                f'pendiente{"s" if plural else ""} de revisión')
+
+    line = f'*{pending}* ' + headline.split(' ', 1)[1]
+    if oldest_days is not None and oldest_days >= 1:
+        line += (f' · el más antiguo lleva *{int(oldest_days)} '
+                 f'día{"s" if int(oldest_days) != 1 else ""}* esperando')
+
+    return {
+        # The fallback is what a mobile push and a screen reader get, so it has
+        # to agree with the rendered line — including the plural.
+        'text': _clip(headline, MAX_TEXT),
+        'blocks': [
+            _section(f':clipboard: {line}'),
+            _context('Revisar en *Pendientes* de la app · '
+                     'confirmar fraude o descartar con motivo'),
+        ],
+    }
+
+
 def build_health_message(title, detail=None, fix=None, level='warn'):
     """A message about the runner itself rather than about fraud."""
     icon = {'warn': ':warning:', 'bad': ':x:', 'info': ':information_source:'}
@@ -374,6 +405,16 @@ def send_health(title, detail=None, fix=None, level='warn',
         return False
     return post(build_health_message(title, detail, fix, level),
                 config.slack_webhook_for(country_code))
+
+
+def send_queue_reminder(pending, oldest_days=None) -> bool:
+    """One nudge a day about the review queue. Silent when it is empty."""
+    if not config.slack_enabled():
+        return False
+    payload = build_queue_message(pending, oldest_days)
+    if payload is None:
+        return False
+    return post(payload, config.slack_webhook_for())
 
 
 def send_test(country_code=None) -> bool:

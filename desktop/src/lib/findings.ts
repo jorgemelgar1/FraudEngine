@@ -151,6 +151,27 @@ export type HistoryFinding = PendingFinding & {
 
 export type ReviewResult = { id: string; ok: boolean; error?: string; result?: unknown };
 
+// Why a Critical finding was dismissed. Must match the check constraint in
+// migration 0013 — a value outside this list is rejected by the database.
+//
+// Five options on purpose. Long taxonomies get answered with whichever item is
+// first, which is worse than no taxonomy at all. `error_detector` is the one
+// that earns its place: it separates "the engine was wrong" from "the engine
+// was right and we are fine with this merchant", and only the first of those
+// should ever move a threshold.
+export const REVIEW_REASONS = [
+  { value: 'cliente_conocido', label: 'Cliente conocido' },
+  { value: 'campana_legitima', label: 'Campaña legítima' },
+  { value: 'prueba_interna',   label: 'Prueba interna' },
+  { value: 'error_detector',   label: 'Error del detector' },
+  { value: 'ya_gestionado',    label: 'Ya gestionado' },
+] as const;
+
+export type ReviewReason = typeof REVIEW_REASONS[number]['value'];
+
+export const REASON_LABELS: Record<string, string> =
+  Object.fromEntries(REVIEW_REASONS.map(r => [r.value, r.label]));
+
 export const PENDING_LIMIT = 500;
 
 export type PendingPage = {
@@ -214,15 +235,52 @@ export async function reviewFindings(
   action: 'accept' | 'reject' | 'undo',
   userId: string,
   userEmail: string,
+  reason?: ReviewReason,
+  note?: string,
 ): Promise<ReviewResult[]> {
   // The RPC returns a jsonb array of per-id results. SECURITY DEFINER, so
   // we don't need service-role; the user's session JWT is enough.
-  const { data, error } = await supabase.rpc('review_findings', {
+  //
+  // `p_reason` / `p_note` only apply to 'reject' and default to null in SQL,
+  // so they are omitted entirely rather than sent as nulls — that keeps this
+  // call identical to the pre-0013 one for accept and undo.
+  const body: Record<string, unknown> = {
     p_finding_ids: findingIds,
     p_action:      action,
     p_user_id:     userId,
     p_user_email:  userEmail,
-  });
+  };
+  if (action === 'reject') {
+    if (reason) body.p_reason = reason;
+    if (note) body.p_note = note;
+  }
+  const { data, error } = await supabase.rpc('review_findings', body);
   if (error) throw new Error(`review_findings: ${error.message}`);
   return (data as unknown as ReviewResult[]) || [];
+}
+
+export type ReviewStats = {
+  decided: number;
+  confirmed: number;
+  dismissed: number;
+  /** Percent of decided Critical findings that were real. Null if none yet. */
+  precision: number | null;
+  by_reason: Record<string, number>;
+  pending: number;
+};
+
+/**
+ * How often the engine is right, and what it gets wrong.
+ *
+ * Computed server-side (migration 0013) so both clients and anyone querying by
+ * hand get the same arithmetic. Counts only findings a human actually decided
+ * — pending ones are not evidence either way, and including them would make
+ * the engine look worse every time the queue grew.
+ */
+export async function reviewStats(since?: Date): Promise<ReviewStats | null> {
+  const { data, error } = await supabase.rpc('review_stats', {
+    p_since: since ? since.toISOString() : null,
+  });
+  if (error) throw new Error(`review_stats: ${error.message}`);
+  return (data as unknown as ReviewStats) || null;
 }

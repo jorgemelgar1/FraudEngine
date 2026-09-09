@@ -275,6 +275,40 @@ def test_card_data_in_the_payload_never_reaches_slack():
         assert secret not in body, f'{secret} leaked into a Slack message'
 
 
+# ── The daily queue nudge ────────────────────────────────────────────────────
+
+def test_an_empty_queue_says_nothing():
+    """A cheerful "0 pendientes" every morning is how a channel becomes
+    background noise, and then the message that matters lands somewhere
+    nobody looks."""
+    assert slack.build_queue_message(0) is None
+    assert slack.build_queue_message(None) is None
+
+
+def test_the_nudge_leads_with_the_count():
+    body = _text(slack.build_queue_message(12))
+    assert '12' in body and 'pendiente' in body
+    assert 'Pendientes' in body, 'it should say where to go'
+
+
+def test_the_age_of_the_oldest_is_what_makes_it_land():
+    """A count alone does not move anyone. "el más antiguo lleva 4 días" is
+    the half that sounds wrong."""
+    body = _text(slack.build_queue_message(12, oldest_days=4.2))
+    assert '4' in body and 'día' in body
+
+
+def test_a_fresh_queue_does_not_claim_an_age():
+    body = _text(slack.build_queue_message(3, oldest_days=0.2))
+    assert 'más antiguo' not in body
+
+
+def test_one_pending_reads_correctly():
+    body = _text(slack.build_queue_message(1, oldest_days=1))
+    assert 'comercio pendiente de revisión' in body
+    assert 'comercios' not in body
+
+
 # ── Health messages ──────────────────────────────────────────────────────────
 
 def test_a_health_message_carries_the_fix_not_just_the_problem():

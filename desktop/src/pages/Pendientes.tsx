@@ -1,23 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 
 import {
   listPending, reviewFindings, reopenInfo, countryCodeOf,
-  type PendingFinding,
+  REVIEW_REASONS, type PendingFinding, type ReviewReason,
 } from '../lib/findings';
+import { describePattern, rankPatterns, verdictFor, actionFor } from '../lib/patterns';
 import { isNetworkError } from '../lib/offline';
 import { OfflineState } from '../components/OfflineState';
 
-type RunGroup = {
-  run_id: string;
-  run_at: string;
-  run_by_email: string;
-  csv_filename: string | null;
-  csv_date_start: string | null;
-  csv_date_end: string | null;
-  source: string | null;
-  findings: PendingFinding[];
-};
+// ── Formatting ───────────────────────────────────────────────────────────────
 
 const fmtCurrency = (n: number | null, code: string | null) => {
   if (n == null) return '—';
@@ -28,11 +20,11 @@ const fmtCurrency = (n: number | null, code: string | null) => {
     return `${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (sin moneda)`;
   }
   try {
-    return n.toLocaleString('en-US', { style: 'currency', currency: code });
+    return n.toLocaleString('en-US', { style: 'currency', currency: code, maximumFractionDigits: 0 });
   } catch {
-    // An ISO code we don't recognise - a country mapped server-side but not
+    // An ISO code we don't recognise — a country mapped server-side but not
     // known to Intl. Render the number and the raw code rather than crashing.
-    return `${code} ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    return `${code} ${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
   }
 };
 
@@ -42,6 +34,47 @@ const fmtDay = (iso: string | null | undefined) => {
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('es', { day: 'numeric', month: 'short' });
 };
+
+function hoursSince(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return (Date.now() - t) / 3_600_000;
+}
+
+/** "hace 3 días". The number that makes a queue get drained. */
+function fmtAge(iso: string | null | undefined): string {
+  const h = hoursSince(iso);
+  if (h === null) return '';
+  if (h < 1) return 'recién';
+  if (h < 24) return `hace ${Math.round(h)} h`;
+  return `hace ${Math.round(h / 24)} día${Math.round(h / 24) === 1 ? '' : 's'}`;
+}
+
+// Two days without a decision is when a queue starts rotting. Not an SLA, just
+// the point where the row should start asking for attention.
+const STALE_HOURS = 48;
+
+function isStale(f: PendingFinding): boolean {
+  const h = hoursSince(f.first_seen_at);
+  return h !== null && h > STALE_HOURS;
+}
+
+/**
+ * Volume context, built here rather than taken from `description_es`.
+ *
+ * The engine's description opens with "47 transacciones (23 REJECTED, 4
+ * SUCCEEDED)" and then concatenates every pattern sentence after it. We show
+ * the patterns individually, so reusing that string would print each
+ * explanation twice — once in the paragraph and once beside its own tag.
+ */
+function volumeLine(payload: Record<string, unknown>): string | null {
+  const total = Number(payload?.total_transactions ?? 0);
+  if (!total) return null;
+  const rejected = Number(payload?.rejected_count ?? 0);
+  const succeeded = Number(payload?.succeeded_count ?? 0);
+  return `${total} transacciones · ${rejected} rechazadas · ${succeeded} exitosas`;
+}
 
 // One-line stand-in for the exposure figure on zero-settlement findings,
 // pulled from the detector's own `metrics` block in the payload. Returns a
@@ -56,12 +89,14 @@ function zeroSettlementSummary(payload: Record<string, unknown>): string {
   return `${attempts} intentos · ${cards} tarjetas · ${ips} IP`;
 }
 
+// ── Page ─────────────────────────────────────────────────────────────────────
+
 export function Pendientes({
   session, online, onChanged,
 }: {
   session: Session;
   online: boolean;
-  // Fires after every successful accept/reject so the header badge refreshes.
+  // Fires after every successful decision so the header badge refreshes.
   onChanged: () => void;
 }) {
   const [findings, setFindings] = useState<PendingFinding[] | null>(null);
@@ -71,16 +106,12 @@ export function Pendientes({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  // Set when a fetch fails with a network error. Separate from `!online`
-  // because the OS-level online signal isn't 100% reliable — sometimes the
-  // page can be "online" per the OS but Supabase is still unreachable
-  // (DNS hiccup, captive portal, etc.). Either flag triggers the offline UI.
+  const [country, setCountry] = useState<string>('all');
+  // Which finding is mid-dismissal. Null means nobody is being asked why.
+  const [dismissing, setDismissing] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
 
   const load = useCallback(async () => {
-    // Short-circuit if the OS already knows we're disconnected — no point
-    // making a fetch that's guaranteed to fail and stall the UI for ~5s
-    // waiting on a timeout.
     if (!online) {
       setOffline(true);
       setFindings(null);
@@ -102,44 +133,43 @@ export function Pendientes({
     }
   }, [online]);
 
-  // Auto-load on mount and whenever `online` changes — so flipping back
-  // online silently refetches without the user having to click anywhere.
   useEffect(() => { load(); }, [load]);
 
-  async function review(action: 'accept' | 'reject', findingIds: string[]) {
-    if (findingIds.length === 0) return;
-    setBusy(prev => {
-      const next = new Set(prev);
-      findingIds.forEach(id => next.add(id));
-      return next;
-    });
+  async function decide(
+    action: 'accept' | 'reject',
+    ids: string[],
+    reason?: ReviewReason,
+    note?: string,
+  ) {
+    if (ids.length === 0) return;
+    setBusy(prev => new Set(prev).add(ids[0]));
     try {
       const results = await reviewFindings(
-        findingIds, action, session.user.id, session.user.email!,
+        ids, action, session.user.id, session.user.email!, reason, note,
       );
-      // Drop only the rows that succeeded; failed ones stay in pending so
-      // the user can retry without re-loading the whole list.
-      const okIds = new Set(results.filter(r => r.ok).map(r => r.id));
-      setFindings(prev => (prev || []).filter(f => !okIds.has(f.id)));
-      const errors = results.filter(r => !r.ok);
-      if (errors.length > 0) {
-        setError(`Algunos hallazgos no se pudieron procesar: ${errors[0].error || errors[0].id}`);
-      } else {
-        setError('');
-      }
+      // Drop only the rows that succeeded; failed ones stay so the user can
+      // retry without reloading the whole list.
+      const ok = new Set(results.filter(r => r.ok).map(r => r.id));
+      setFindings(prev => (prev || []).filter(f => !ok.has(f.id)));
+      setTotal(t => Math.max(0, t - ok.size));
+      const failed = results.filter(r => !r.ok);
+      setError(failed.length
+        ? `No se pudo procesar: ${failed[0].error || failed[0].id}`
+        : '');
+      setDismissing(null);
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(prev => {
         const next = new Set(prev);
-        findingIds.forEach(id => next.delete(id));
+        ids.forEach(id => next.delete(id));
         return next;
       });
     }
   }
 
-  function toggleExpanded(id: string) {
+  function toggle(id: string) {
     setExpanded(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
@@ -147,31 +177,29 @@ export function Pendientes({
     });
   }
 
-  // Group findings by run so bulk actions are scoped to a single CSV upload.
-  const groups: RunGroup[] = (() => {
-    if (!findings) return [];
-    const map = new Map<string, RunGroup>();
-    for (const f of findings) {
-      const existing = map.get(f.run_id);
-      if (existing) {
-        existing.findings.push(f);
-      } else {
-        map.set(f.run_id, {
-          run_id:         f.run_id,
-          run_at:         f.analysis_runs?.run_at || '',
-          run_by_email:   f.analysis_runs?.run_by_email || '',
-          csv_filename:   f.analysis_runs?.csv_filename || null,
-          csv_date_start: f.analysis_runs?.csv_date_start || null,
-          csv_date_end:   f.analysis_runs?.csv_date_end || null,
-          source:         f.analysis_runs?.source || null,
-          findings:       [f],
-        });
-      }
+  // Countries present in the queue, so the filter never offers an empty one.
+  const countries = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const f of findings || []) {
+      const c = countryCodeOf(f.analysis_runs?.currency_source);
+      if (c) seen.set(c, (seen.get(c) || 0) + 1);
     }
-    return Array.from(map.values()).sort(
-      (a, b) => (b.run_at || '').localeCompare(a.run_at || ''),
-    );
-  })();
+    return [...seen.entries()].sort((a, b) => b[1] - a[1]);
+  }, [findings]);
+
+  const visible = useMemo(() => {
+    const rows = (findings || []).filter(f =>
+      country === 'all' || countryCodeOf(f.analysis_runs?.currency_source) === country);
+    // Worst first, and among equal scores the most money at stake. Grouping by
+    // upload made sense when a person uploaded one file a day; with the runner
+    // producing eight it just scattered the queue across headers.
+    return rows.sort((a, b) =>
+      (b.risk_score - a.risk_score)
+      || ((b.chargeback_exposure_usd || 0) - (a.chargeback_exposure_usd || 0)));
+  }, [findings, country]);
+
+  const staleCount = visible.filter(isStale).length;
+  const atRisk = visible.reduce((s, f) => s + (f.chargeback_exposure_usd || 0), 0);
 
   if (offline) {
     return <OfflineState title="Revisiones pendientes" onRetry={load} disabled={!online} />;
@@ -180,192 +208,287 @@ export function Pendientes({
   return (
     <main className="main">
       <div className="card">
-        <h2 style={{ marginTop: 0 }}>Revisiones pendientes</h2>
-        <p className="muted">
-          Cada hallazgo Critical permanece pendiente hasta que un miembro del
-          equipo lo acepte (se agrega a la Watchlist) o lo descarte. Los
-          falsos positivos descartados no afectan la Watchlist.
+        <div className="queue-head">
+          <div>
+            <h2 style={{ margin: 0 }}>
+              {findings === null
+                ? 'Cargando…'
+                : total === 0
+                  ? 'No hay comercios por revisar'
+                  : `Tienes ${total} comercio${total === 1 ? '' : 's'} por revisar`}
+            </h2>
+            {findings !== null && total > 0 && (
+              <p className="muted small" style={{ margin: '.3rem 0 0' }}>
+                {staleCount > 0 && (
+                  <span className="stale-note">
+                    {staleCount} lleva{staleCount === 1 ? '' : 'n'} más de 2 días esperando ·{' '}
+                  </span>
+                )}
+                {atRisk > 0 && `${fmtCurrency(atRisk, 'USD')} en riesgo estimado`}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {countries.length > 1 && (
+          <div className="chip-filters">
+            <FilterChip on={country === 'all'} onClick={() => setCountry('all')}>
+              Todos {findings?.length ?? 0}
+            </FilterChip>
+            {countries.map(([code, n]) => (
+              <FilterChip key={code} on={country === code} onClick={() => setCountry(code)}>
+                {code} {n}
+              </FilterChip>
+            ))}
+          </div>
+        )}
+
+        <p className="muted small" style={{ marginBottom: 0 }}>
+          Cada comercio necesita una decisión: <strong>confirmar fraude</strong>{' '}
+          lo agrega a la watchlist, <strong>no es fraude</strong> lo descarta
+          como falso positivo y guarda el motivo.
         </p>
+
         {/* Past the query limit the list is a subset. Saying so beats the
             header badge quietly disagreeing with what is on screen. */}
         {findings !== null && total > findings.length && (
-          <div className="error-banner">
+          <div className="error-banner" style={{ marginTop: '1rem' }}>
             Mostrando {findings.length} de {total} pendientes, los de mayor
             riesgo primero. Revisa algunos para ver el resto.
           </div>
         )}
-        {error && <div className="error-banner">{error}</div>}
-        {findings === null && <p className="muted">Cargando…</p>}
-        {findings !== null && findings.length === 0 && (
-          <p className="success-banner">
-            No hay hallazgos pendientes de revisión.
+        {error && <div className="error-banner" style={{ marginTop: '1rem' }}>{error}</div>}
+        {findings !== null && total === 0 && (
+          <p className="success-banner" style={{ marginTop: '1rem' }}>
+            La cola está vacía. El runner sigue analizando cada hora.
           </p>
         )}
       </div>
 
-      {groups.map(g => {
-        const groupIds = g.findings.map(f => f.id);
-        const groupBusy = groupIds.some(id => busy.has(id));
-        return (
-          <div className="card" key={g.run_id}>
-            <div className="group-head">
+      {visible.length > 0 && (
+        <div className="card queue-list">
+          {visible.map(f => (
+            <QueueRow
+              key={f.id}
+              f={f}
+              open={expanded.has(f.id)}
+              busy={busy.has(f.id)}
+              dismissing={dismissing === f.id}
+              onToggle={() => toggle(f.id)}
+              onConfirm={() => decide('accept', [f.id])}
+              onStartDismiss={() => setDismissing(f.id)}
+              onCancelDismiss={() => setDismissing(null)}
+              onDismiss={(reason, note) => decide('reject', [f.id], reason, note)}
+            />
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
+
+// ── One merchant ─────────────────────────────────────────────────────────────
+
+function QueueRow({
+  f, open, busy, dismissing,
+  onToggle, onConfirm, onStartDismiss, onCancelDismiss, onDismiss,
+}: {
+  f: PendingFinding;
+  open: boolean;
+  busy: boolean;
+  dismissing: boolean;
+  onToggle: () => void;
+  onConfirm: () => void;
+  onStartDismiss: () => void;
+  onCancelDismiss: () => void;
+  onDismiss: (reason: ReviewReason, note: string) => void;
+}) {
+  const reopened = reopenInfo(f);
+  const country = countryCodeOf(f.analysis_runs?.currency_source);
+  const seen = f.times_seen ?? 1;
+  const stale = isStale(f);
+  const zero = f.section === 'zero_settlement';
+  const patterns = rankPatterns(f.fingerprints || []);
+  const action = actionFor(f.action_code);
+  const evidence = ((f.payload as any)?.evidence || []) as Array<Record<string, unknown>>;
+  const volume = volumeLine(f.payload);
+
+  return (
+    <div className={`qrow ${open ? 'open' : ''} ${reopened ? 'reopened' : ''}`}>
+      <button className="qrow-head" onClick={onToggle} aria-expanded={open}>
+        <span className={`qscore ${f.risk_score >= 80 ? 'hot' : ''}`}>{f.risk_score}</span>
+        <span className="qmain">
+          <span className="qname">
+            {f.company_name}
+            {country && <span className="tag country">{country}</span>}
+            {reopened && <span className="tag reopened-chip">volvió</span>}
+          </span>
+          <span className="qverdict">
+            {verdictFor(f.finding_type)}
+            {' · '}
+            {seen > 1
+              ? `visto ${seen} veces desde el ${fmtDay(f.first_seen_at)}`
+              : 'primera detección'}
+          </span>
+        </span>
+        <span className="qright">
+          <span className="qamt">
+            {zero
+              ? <span className="muted small">sin liquidación</span>
+              : fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
+          </span>
+          <span className={`qage ${stale ? 'stale' : ''}`}>{fmtAge(f.first_seen_at)}</span>
+        </span>
+        <span className="qcaret" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </button>
+
+      {open && (
+        <div className="qbody">
+          {/* The runner re-opens a dismissed finding when it comes back
+              materially worse, and records why. Until now that reason was
+              written and never shown, so a re-opened finding looked brand new
+              and could be dismissed again on reasoning that had stopped being
+              true. Slack now sends people straight to this screen. */}
+          {reopened && (
+            <div className="reopen-banner">
+              <div className="reopen-title">⟳ Ya se revisó antes</div>
               <div>
-                <strong>{g.csv_filename || '(sin nombre)'}</strong>
-                {/* Which of these came from the robot is the first question
-                    anyone asks when a number looks wrong. The runner's email
-                    hints at it; `source` is what actually records it. */}
-                {g.source === 'auto' ? (
-                  <span className="tag origin auto" style={{ marginLeft: '0.6rem' }}>
-                    Automático
-                  </span>
-                ) : (
-                  <span className="tag origin manual" style={{ marginLeft: '0.6rem' }}>
-                    Manual
-                  </span>
-                )}
-                <div className="muted small">
-                  {g.csv_date_start === g.csv_date_end
-                    ? g.csv_date_start
-                    : `${g.csv_date_start} → ${g.csv_date_end}`}
-                  {g.source === 'auto'
-                    ? ' · Generado por el runner'
-                    : ` · Subido por ${g.run_by_email}`}
-                  {' · '}{g.findings.length} pendiente{g.findings.length === 1 ? '' : 's'}
-                </div>
-              </div>
-              <div className="group-actions">
-                <button
-                  className="btn ghost small"
-                  disabled={groupBusy}
-                  onClick={() => review('accept', groupIds)}
-                >
-                  Aceptar todos
-                </button>
-                <button
-                  className="btn ghost small"
-                  disabled={groupBusy}
-                  onClick={() => review('reject', groupIds)}
-                >
-                  Descartar todos
-                </button>
+                Descartado
+                {reopened.rejectedBy ? ` por ${reopened.rejectedBy}` : ''}
+                {' '}el {fmtDay(reopened.rejectedAt)}
+                {reopened.reason
+                  ? <> · volvió porque <strong>{reopened.reason}</strong>.</>
+                  : ' · volvió a la cola.'}
               </div>
             </div>
+          )}
 
-            <ul className="findings" style={{ marginTop: '1rem' }}>
-              {g.findings.map(f => {
-                const isOpen = expanded.has(f.id);
-                const isBusy = busy.has(f.id);
-                const evidence = ((f.payload as any)?.evidence || []) as Array<Record<string, unknown>>;
-                const action = (f.payload as any)?.recommended_action_es as string | undefined;
-                const reopened = reopenInfo(f);
-                const country = countryCodeOf(f.analysis_runs?.currency_source);
-                const seen = f.times_seen ?? 1;
-                return (
-                  <li key={f.id} className="finding critical">
-                    {/* The runner re-opens a dismissed finding when it comes
-                        back materially worse, and records why. Until now that
-                        reason was written and never shown, so a re-opened
-                        finding looked brand new — and a reviewer could dismiss
-                        it again on reasoning that had since stopped being
-                        true. Slack now points people straight here. */}
-                    {reopened && (
-                      <div className="reopen-banner">
-                        <div className="reopen-title">⟳ Ya se revisó antes</div>
-                        <div>
-                          Descartado
-                          {reopened.rejectedBy ? ` por ${reopened.rejectedBy}` : ''}
-                          {' '}el {fmtDay(reopened.rejectedAt)}
-                          {reopened.reason
-                            ? <> · volvió porque <strong>{reopened.reason}</strong>.</>
-                            : ' · volvió a la cola.'}
-                        </div>
-                      </div>
-                    )}
-                    <div className="finding-head">
-                      <div style={{ flex: '1 1 320px' }}>
-                        <strong>{f.company_name}</strong>
-                        {country && (
-                          <span className="tag country" style={{ marginLeft: '0.5rem' }}>
-                            {country}
-                          </span>
-                        )}
-                        {f.section === 'zero_settlement' && (
-                          <span className="tag zero-settlement" style={{ marginLeft: '0.6rem' }}>
-                            Sin liquidación
-                          </span>
-                        )}
-                        <span className="muted small" style={{ marginLeft: '0.75rem' }}>
-                          Riesgo: {f.risk_score}
-                        </span>
-                        {/* Zero-settlement findings settle nothing, so an
-                            exposure figure would always read "—". Show the
-                            card-testing metrics that justify the flag instead. */}
-                        <span className="muted small" style={{ marginLeft: '0.75rem' }}>
-                          {f.section === 'zero_settlement'
-                            ? zeroSettlementSummary(f.payload)
-                            : `Exposición: ${fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}`}
-                        </span>
-                      </div>
-                      <div className="row-actions">
-                        <button className="btn ghost small" disabled={isBusy} onClick={() => review('accept', [f.id])}>
-                          Aceptar
-                        </button>
-                        <button className="btn ghost small" disabled={isBusy} onClick={() => review('reject', [f.id])}>
-                          Descartar
-                        </button>
-                        <button className="btn ghost small" onClick={() => toggleExpanded(f.id)}>
-                          {isOpen ? 'Ocultar' : 'Detalles'}
-                        </button>
-                      </div>
-                    </div>
-                    {f.description_es && (
-                      <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>{f.description_es}</p>
-                    )}
-                    {/* Stored since migration 0010 and read by nothing until
-                        now. One sighting may be noise; sixteen in a row is
-                        not, and that is the cheapest way to prioritise. */}
-                    <div className="muted small">
-                      {seen > 1
-                        ? `Visto ${seen} veces desde el ${fmtDay(f.first_seen_at)}`
-                        : `Primera detección${f.first_seen_at ? `, el ${fmtDay(f.first_seen_at)}` : ''}`}
-                    </div>
-                    <div className="tags">
-                      {(f.fingerprints || []).map(fp => (
-                        <span className="tag" key={fp}>{fp}</span>
-                      ))}
-                    </div>
-                    {isOpen && (
-                      <div className="finding-details">
-                        {action && (
-                          <p className="muted">
-                            <strong>Acción recomendada:</strong> {action}
-                          </p>
-                        )}
-                        {evidence.length > 0 && (
-                          <>
-                            <div className="muted small" style={{ marginBottom: '0.4rem' }}>
-                              Evidencia ({evidence.length} de hasta 5):
-                            </div>
-                            <ul className="evidence-list">
-                              {evidence.map((e, i) => (
-                                <li key={i}>
-                                  {String(e.transaction_id || '?')} · {String(e.status || '')}
-                                  {e.card_bin ? ` · ${String(e.card_bin)}-${String(e.card_last_digits ?? '')}` : ''}
-                                  {e.timestamp ? ` · ${String(e.timestamp).slice(0, 19).replace('T', ' ')}` : ''}
-                                </li>
-                              ))}
-                            </ul>
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+          {volume && <div className="qvolume">{volume}</div>}
+          {zero && <div className="qvolume">{zeroSettlementSummary(f.payload)}</div>}
+
+          {/* One sentence per pattern, strongest first. The engine writes the
+              same explanations but joins them into a single paragraph with no
+              link back to the tags — see lib/patterns.ts. */}
+          <div className="qwhy">
+            {patterns.map(code => {
+              const p = describePattern(code);
+              return (
+                <div className="qwhy-item" key={code}>
+                  <span className="qwhy-tag">{p.label}</span>
+                  <span className="qwhy-txt">{p.explain}</span>
+                </div>
+              );
+            })}
           </div>
-        );
-      })}
-    </main>
+
+          {action && (
+            <div className="qreco"><strong>Acción recomendada:</strong> {action}</div>
+          )}
+
+          {evidence.length > 0 && (
+            <details className="qevidence">
+              <summary>Ver transacciones ({evidence.length} de ejemplo)</summary>
+              <ul className="evidence-list">
+                {evidence.map((e, i) => (
+                  <li key={i}>
+                    {String(e.transaction_id || '?')} · {String(e.status || '')}
+                    {e.card_bin ? ` · ${String(e.card_bin)}-${String(e.card_last_digits ?? '')}` : ''}
+                    {e.timestamp ? ` · ${String(e.timestamp).slice(0, 19).replace('T', ' ')}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          {dismissing ? (
+            <DismissForm
+              company={f.company_name}
+              busy={busy}
+              onCancel={onCancelDismiss}
+              onSubmit={onDismiss}
+            />
+          ) : (
+            <div className="qactions">
+              <button className="btn danger" disabled={busy} onClick={onConfirm}>
+                Confirmar fraude
+              </button>
+              <button className="btn ghost" disabled={busy} onClick={onStartDismiss}>
+                No es fraude
+              </button>
+              <span className="muted small qsource">
+                {f.analysis_runs?.source === 'auto'
+                  ? 'Detectado por el runner'
+                  : `Subido por ${f.analysis_runs?.run_by_email || 'alguien'}`}
+                {' · '}{fmtDay(f.analysis_runs?.run_at)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Asking why ───────────────────────────────────────────────────────────────
+
+function DismissForm({
+  company, busy, onCancel, onSubmit,
+}: {
+  company: string;
+  busy: boolean;
+  onCancel: () => void;
+  onSubmit: (reason: ReviewReason, note: string) => void;
+}) {
+  const [reason, setReason] = useState<ReviewReason | null>(null);
+  const [note, setNote] = useState('');
+
+  return (
+    <div className="dismiss">
+      <div className="dismiss-title">{company} — ¿por qué no es fraude?</div>
+      <div className="muted small" style={{ marginBottom: '.6rem' }}>
+        Se guarda con tu nombre. Sirve para medir en qué se equivoca el motor.
+      </div>
+      <div className="chip-filters">
+        {REVIEW_REASONS.map(r => (
+          <FilterChip key={r.value} on={reason === r.value} onClick={() => setReason(r.value)}>
+            {r.label}
+          </FilterChip>
+        ))}
+      </div>
+      <input
+        className="dismiss-note"
+        placeholder="Nota opcional…"
+        value={note}
+        maxLength={300}
+        onChange={e => setNote(e.target.value)}
+      />
+      <div className="qactions">
+        <button
+          className="btn"
+          disabled={busy || !reason}
+          onClick={() => reason && onSubmit(reason, note.trim())}
+          title={reason ? undefined : 'Elige un motivo primero'}
+        >
+          {busy ? 'Guardando…' : 'Guardar y descartar'}
+        </button>
+        <button className="btn ghost" disabled={busy} onClick={onCancel}>
+          Cancelar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FilterChip({
+  on, onClick, children,
+}: {
+  on: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button className={`chip-filter ${on ? 'on' : ''}`} onClick={onClick}>
+      {children}
+    </button>
   );
 }

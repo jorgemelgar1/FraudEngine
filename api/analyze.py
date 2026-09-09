@@ -164,8 +164,10 @@ def load_watchlist_from_supabase() -> dict:
     their 'is this a known offender?' signal once the watchlist grows past
     1000 rows.
     """
-    merchants = sb_rest('GET', 'watchlist_merchants?select=*&limit=100000') or []
-    cards     = sb_rest('GET', 'watchlist_cards?select=*&limit=100000') or []
+    # See runner/supabase_io.py: soft-removed entries (migration 0014) must
+    # not match, or taking a merchant off the watchlist does nothing.
+    merchants = sb_rest('GET', 'watchlist_merchants?select=*&removed_at=is.null&limit=100000') or []
+    cards     = sb_rest('GET', 'watchlist_cards?select=*&removed_at=is.null&limit=100000') or []
 
     wl = {'merchants': {}, 'cards': {}}
     for m in merchants:

@@ -82,8 +82,11 @@ def load_watchlist() -> dict:
     watchlist silently truncates as it grows and the detectors quietly lose
     their "known offender" signal - a failure that looks like a clean report.
     """
-    merchants = sb_rest('GET', 'watchlist_merchants?select=*&limit=100000') or []
-    cards     = sb_rest('GET', 'watchlist_cards?select=*&limit=100000') or []
+    # `removed_at=is.null` is load-bearing, not tidiness: a merchant taken
+    # off the watchlist (migration 0014) must stop matching, or removal is
+    # purely cosmetic and a wrongly-frozen merchant stays flagged forever.
+    merchants = sb_rest('GET', 'watchlist_merchants?select=*&removed_at=is.null&limit=100000') or []
+    cards     = sb_rest('GET', 'watchlist_cards?select=*&removed_at=is.null&limit=100000') or []
 
     wl = {'merchants': {}, 'cards': {}}
     for m in merchants:
@@ -334,6 +337,45 @@ def cycle_finish(cycle_id: str, outcome: str, detail: str = None):
         print(f'  [ciclo] AVISO: el ciclo terminó como {outcome} pero no se '
               f'pudo registrar, así que quedará como "en curso": {e}')
         return False
+
+
+def pending_summary():
+    """(count, oldest_first_seen_at) for the Critical review queue.
+
+    A count alone does not move anyone. "12 pendientes, el más antiguo lleva 4
+    días" does, because the second half is the part that sounds wrong.
+
+    Uses PostgREST's exact count rather than fetching rows: the runner has no
+    business pulling merchant names it will not use, and the queue can be large.
+    """
+    try:
+        rows = sb_rest(
+            'GET',
+            'findings_history'
+            '?select=first_seen_at'
+            '&review_status=eq.pending'
+            '&confidence=eq.Critical'
+            '&order=first_seen_at.asc'
+            '&limit=1',
+            prefer='count=exact',
+        )
+    except SupabaseError as e:
+        print(f'  [slack] no se pudo leer la cola de pendientes: {e}')
+        return None, None
+
+    oldest = (rows or [{}])[0].get('first_seen_at') if rows else None
+    # PostgREST returns the total in Content-Range, which sb_rest does not
+    # expose. A second cheap request is simpler than threading headers through
+    # the whole transport for one caller.
+    try:
+        total_rows = sb_rest(
+            'GET',
+            'findings_history?select=id'
+            '&review_status=eq.pending&confidence=eq.Critical&limit=1000',
+        ) or []
+    except SupabaseError:
+        return None, None
+    return len(total_rows), oldest
 
 
 def runner_health():

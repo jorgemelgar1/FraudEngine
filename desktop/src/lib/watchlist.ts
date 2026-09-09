@@ -30,8 +30,10 @@ export type WatchlistDict = {
 // Same 100k limit the Vercel function uses.
 export async function loadWatchlist(): Promise<WatchlistDict> {
   const [merchantsRes, cardsRes] = await Promise.all([
-    supabase.from('watchlist_merchants').select('*').limit(100000),
-    supabase.from('watchlist_cards').select('*').limit(100000),
+    // Soft-removed entries (migration 0014) must not match, or taking a
+    // merchant off the watchlist would change nothing about the analysis.
+    supabase.from('watchlist_merchants').select('*').is('removed_at', null).limit(100000),
+    supabase.from('watchlist_cards').select('*').is('removed_at', null).limit(100000),
   ]);
 
   if (merchantsRes.error) throw new Error(`watchlist_merchants: ${merchantsRes.error.message}`);
