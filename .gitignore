@@ -37,3 +37,11 @@ dist/
 .idea/
 *.swp
 .claude/
+
+# Runner local state. Downloaded reports contain live cardholder data and the
+# token file is a credential - neither may ever reach the repo, even if
+# someone later points WORK_DIR at the project directory.
+*.dpapi
+runner/work/
+runner/*.csv
+runner/.env

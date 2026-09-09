@@ -205,6 +205,12 @@ CONTACTLESS_PLACEHOLDERS = {
 
 DEFAULT_CURRENCY = 'USD'
 
+# Returned when the country is missing or not in COUNTRY_TO_CURRENCY. It is
+# deliberately NOT a real currency: silently defaulting to USD is what let a
+# Guatemalan file be labelled in dollars for four months. An explicit
+# UNKNOWN makes the gap visible instead of plausible.
+UNKNOWN_CURRENCY = 'UNKNOWN'
+
 COUNTRY_TO_CURRENCY = {
     'panama':       'USD',
     'el salvador':  'USD',
@@ -222,19 +228,41 @@ def _normalize_country(name: str) -> str:
     return name
 
 
-def detect_currency(df_u, default: str = DEFAULT_CURRENCY) -> str:
-    """Return the ISO currency code for this CSV. Uses the most-common
-    non-null country_name value. Unknown country falls back to `default`."""
+def detect_currency(df_u, default: str = None) -> str:
+    """Return the ISO currency code for this CSV.
+
+    Uses the most-common non-null `country_name`. An unmapped or missing
+    country returns UNKNOWN rather than a plausible-looking default, so the
+    next country Cubo launches in fails loudly instead of quietly booking its
+    transactions in dollars.
+
+    `default` is kept for callers that genuinely want a fallback, but nothing
+    in the engine passes it.
+    """
+    fallback = default if default is not None else UNKNOWN_CURRENCY
+    code, _source = detect_currency_with_source(df_u, fallback)
+    return code
+
+
+def detect_currency_with_source(df_u, fallback: str = None):
+    """(currency_code, source_country) — the country the code came from.
+
+    The source is threaded into the run summary. Country never reaches
+    storage otherwise, which is exactly why the original bug was impossible
+    to diagnose from the database: a wrong code left nothing to trace back.
+    """
+    fallback = fallback if fallback is not None else UNKNOWN_CURRENCY
     if 'country_name' not in df_u.columns:
-        return default
+        return fallback, None
     countries = df_u['country_name'].dropna().astype(str).map(_normalize_country)
     countries = countries[countries != '']
     if countries.empty:
-        return default
+        return fallback, None
     top = countries.mode()
     if len(top) == 0:
-        return default
-    return COUNTRY_TO_CURRENCY.get(top.iloc[0], default)
+        return fallback, None
+    source = top.iloc[0]
+    return COUNTRY_TO_CURRENCY.get(source, fallback), source
 
 
 # ---------------------------------------------------------------------------
@@ -722,8 +750,16 @@ def detect_bin_diversity_burst(df_u):
 # Foreign-card velocity
 # ---------------------------------------------------------------------------
 
-def _normalize_country(val):
-    """Uppercase + strip country strings; treat blanks / 'nan' as missing."""
+def _normalize_country_code(val):
+    """Uppercase + strip country strings; treat blanks / 'nan' as missing.
+
+    Renamed from `_normalize_country` in 2026-09. It had the same name as the
+    currency helper 500 lines above, and being defined later it silently won
+    — so every COUNTRY_TO_CURRENCY lookup received an uppercase string, missed
+    the lowercase keys, and fell through to the USD default. Multi-currency
+    never worked from the day it shipped. The name says what it is now: this
+    produces a comparison KEY for merchant-vs-card country, not a table key.
+    """
     if pd.isna(val):
         return None
     s = str(val).strip().upper()
@@ -744,8 +780,8 @@ def detect_foreign_card_velocity(df_u):
     """
     hits = {}
     df = df_u.copy()
-    df['_merchant_country'] = df['country_name'].apply(_normalize_country)
-    df['_card_country'] = df['card_country_mind_fraud'].apply(_normalize_country)
+    df['_merchant_country'] = df['country_name'].apply(_normalize_country_code)
+    df['_card_country'] = df['card_country_mind_fraud'].apply(_normalize_country_code)
     df['_is_foreign'] = (
         df['_merchant_country'].notna()
         & df['_card_country'].notna()
@@ -2027,7 +2063,7 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
     # Currency for this CSV. One value per file because CSVs are country-
     # specific; threaded through findings and the summary so the frontend
     # and the Spanish action text both render the right ISO code.
-    currency = detect_currency(df_u)
+    currency, currency_source = detect_currency_with_source(df_u)
 
     # Confirmed-fraud indicators. Matched once over the whole frame and then
     # grouped by merchant, so the per-merchant loop below is a dict lookup.
@@ -2351,6 +2387,10 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
         'total_watchlist_hits': len(watchlist_hits_merchants),
         'estimated_chargeback_exposure': round(sum(f.get('estimated_chargeback_exposure', 0) for f in critical_findings), 2),
         'currency': currency,
+        # The country the code was derived from. Country never reaches storage
+        # otherwise, which is precisely why the four-month currency bug could
+        # not be diagnosed from the database after the fact.
+        'currency_source': currency_source,
         'total_high_risk_score_transactions': len(high_risk_score_transactions),
         'total_foreign_card_velocity_merchants': len(foreign_card_bursts),
         'total_suspicious_rejected_merchants': len(suspicious_rejected),
