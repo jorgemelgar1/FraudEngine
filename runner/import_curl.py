@@ -38,7 +38,8 @@ IS_WINDOWS = sys.platform == 'win32'
 # The four settings a report request tells us. Everything else in .env is
 # left exactly as it is.
 CMS_KEYS = ('CUBO_API_ROOT', 'CUBO_REPORT_PATH',
-            'CUBO_ORIGIN', 'CUBO_REFERER')
+            'CUBO_ORIGIN', 'CUBO_REFERER',
+            'CUBO_USER_AGENT', 'CUBO_ACCEPT_LANGUAGE')
 
 
 class CurlError(RuntimeError):
@@ -268,6 +269,23 @@ def settings_from_curl(text: str) -> tuple:
         origins_from_headers(parsed['headers'], shape['CUBO_API_ROOT']))
 
     notes = []
+
+    # Replay what the browser sent rather than curating it. Something in front
+    # of this API returns 403 for `Python-urllib/...`, and the first probe only
+    # passed because PowerShell's default User-Agent happens to start with
+    # `Mozilla/5.0`. The browser's own string is the one known to work.
+    user_agent = parsed['headers'].get('user-agent', '').strip()
+    if user_agent:
+        settings['CUBO_USER_AGENT'] = user_agent
+    else:
+        notes.append(
+            'No User-Agent in that request, so a default Chrome string will '
+            'be used. If the API answers 403, copy the cURL again - the '
+            'User-Agent is the header it is most likely filtering on.')
+
+    language = parsed['headers'].get('accept-language', '').strip()
+    if language:
+        settings['CUBO_ACCEPT_LANGUAGE'] = language
     if not shape['looks_like_report']:
         notes.append(
             'The path does not contain the word "report". If you copied a '
@@ -412,7 +430,10 @@ def main(argv=None) -> int:
     print()
     print('Configuración encontrada:')
     for key in CMS_KEYS:
-        print(f'  {key}={settings[key]}')
+        if key in settings:
+            value = settings[key]
+            shown = value if len(value) <= 74 else value[:71] + '...'
+            print(f'  {key}={shown}')
     print()
     print(f'  Token: {token_store.fingerprint(token)}')
     expires_at, seconds_left = token_store.expiry(token)

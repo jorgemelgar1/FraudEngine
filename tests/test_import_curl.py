@@ -121,6 +121,53 @@ def test_bearer_is_recovered_from_raw_text_as_a_last_resort():
         parsed['headers'], raw_text=weird) == TOKEN
 
 
+def test_user_agent_is_captured_and_replayed():
+    """The API returned 403 for `Python-urllib/...`. The first probe only
+    passed because PowerShell's default User-Agent starts with Mozilla/5.0 -
+    the check had been passing by accident. Replay the browser's own."""
+    agent = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+             '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36')
+    text = CURL.replace(
+        "  -H 'accept: */*' \\\n",
+        f"  -H 'accept: */*' \\\n  -H 'user-agent: {agent}' \\\n"
+        "  -H 'accept-language: es-419,es;q=0.9' \\\n")
+    settings, _token, _notes = import_curl.settings_from_curl(text)
+    assert settings['CUBO_USER_AGENT'] == agent
+    assert settings['CUBO_ACCEPT_LANGUAGE'] == 'es-419,es;q=0.9'
+
+
+def test_missing_user_agent_is_called_out():
+    """Silently falling back to a default is fine, but not saying so leaves
+    the next 403 unexplainable."""
+    settings, _token, notes = import_curl.settings_from_curl(CURL)
+    assert 'CUBO_USER_AGENT' not in settings
+    assert any('User-Agent' in n for n in notes)
+
+
+def test_runner_never_sends_a_python_user_agent():
+    """urllib's default is `Python-urllib/x.y`, which is what got the 403."""
+    sys.path.insert(0, os.path.join(_ROOT, 'runner'))
+    import cubo_api
+    headers = cubo_api._headers('a-token')
+    assert 'User-Agent' in headers
+    assert 'urllib' not in headers['User-Agent'].lower()
+    assert 'python' not in headers['User-Agent'].lower()
+    assert headers['User-Agent'].startswith('Mozilla/5.0')
+
+
+def test_diagnostic_url_is_the_url_that_gets_sent():
+    """A diagnostic that reconstructs the URL can agree with itself while
+    disagreeing with reality, which is worse than having no diagnostic."""
+    import inspect
+
+    sys.path.insert(0, os.path.join(_ROOT, 'runner'))
+    import cubo_api
+    source = inspect.getsource(cubo_api.trigger_report)
+    assert 'report_url(' in source, (
+        'trigger_report must call report_url() rather than building its own'
+    )
+
+
 def test_percent_escaping_is_undone_for_cmd():
     """cmd doubles % — leaving it doubled corrupts any URL-encoded value."""
     text = ('curl ^"https://api.example.internal/api/1/cms/3/report'
@@ -308,8 +355,15 @@ def test_new_keys_are_appended():
     with open(path, encoding='utf-8') as fh:
         written = fh.read()
     assert 'SUPABASE_SERVICE_ROLE_KEY=sb_secret_x' in written
-    for key in import_curl.CMS_KEYS:
-        assert f'{key}=' in written, key
+    # Every setting that was found gets written. Not every CMS_KEY is always
+    # found - a request without a User-Agent yields none, and writing an
+    # empty one would override config.py's working default with nothing.
+    for key in settings:
+        assert f'{key}={settings[key]}' in written, key
+    assert 'CUBO_USER_AGENT=' not in written, (
+        'this fixture has no User-Agent; writing a blank one would defeat '
+        'the default in config.py'
+    )
 
 
 def test_the_token_is_never_written_to_env():

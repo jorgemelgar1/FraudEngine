@@ -123,6 +123,40 @@ def health(now: datetime = None) -> int:
     return 1
 
 
+def show_request(country: str = None, lookback_days: int = None) -> int:
+    """Print the exact request the runner would send, token redacted.
+
+    A 403 from this API is a header problem, and the only way to settle which
+    header is to compare what the runner sends against what the browser sent.
+    Guessing costs a round trip each time; this makes it a diff.
+    """
+    country = choose_country(country)
+    meta = config.country_by_code(country)
+    date_from, date_to = cubo_api.date_window(lookback_days)
+    url = cubo_api.report_url(meta['id'], date_from, date_to)
+
+    try:
+        token = token_store.read_token()
+    except FileNotFoundError:
+        token = ''
+        print('AVISO: no hay token guardado; se muestra sin Authorization.')
+
+    print()
+    print(f'GET {url}')
+    print()
+    print('Cabeceras:')
+    for name, value in sorted(cubo_api._headers(token).items()):
+        if name == 'Authorization':
+            length = len(token)
+            value = f'Bearer <{length} caracteres, oculto>'
+        print(f'  {name}: {value}')
+    print()
+    print('Compara esto con el cURL del navegador. Si el navegador manda una')
+    print('cabecera que aquí falta, esa es la que el API está revisando:')
+    print('  python3 runner/import_curl.py --show-headers')
+    return 0
+
+
 def run_cycle(country: str, dry_run: bool = False,
               lookback_days: int = None) -> int:
     import gmail  # noqa: PLC0415  (importing costs nothing until this mode)
@@ -177,12 +211,21 @@ def main(argv=None) -> int:
                         help='show what would happen; request nothing')
     parser.add_argument('--health', action='store_true',
                         help='report countries that have gone quiet, then exit')
+    parser.add_argument('--show-request', action='store_true',
+                        help='print the exact request that would be sent')
     parser.add_argument('--lookback-days', type=int, default=None,
                         help='override the window (default: today + yesterday)')
     args = parser.parse_args(argv)
 
     if args.health:
         return health()
+
+    if args.show_request:
+        # Only the CMS block is needed to build the request, and demanding
+        # Gmail or Supabase here would block the very diagnostic someone
+        # reaches for when the CMS call is what is broken.
+        config.validate('cms')
+        return show_request(args.country, args.lookback_days)
 
     try:
         config.validate('cms', 'mail', 'url', 'supabase', 'gmail')

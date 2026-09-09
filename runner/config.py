@@ -67,6 +67,17 @@ COUNTRIES_PATH = _env('CUBO_COUNTRIES_PATH')
 ORIGIN = _env('CUBO_ORIGIN')
 REFERER = _env('CUBO_REFERER')
 
+# Something in front of the API filters on the User-Agent: `Python-urllib/...`
+# gets a 403. Captured from the real browser request by import_curl.py; the
+# default is a plain modern Chrome string so an existing .env keeps working
+# without being re-imported.
+USER_AGENT = _env(
+    'CUBO_USER_AGENT',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36')
+
+ACCEPT_LANGUAGE = _env('CUBO_ACCEPT_LANGUAGE', 'es-ES,es;q=0.9,en;q=0.8')
+
 
 # ── Countries ────────────────────────────────────────────────────────────────
 # Confirmed against the live countries endpoint, not guessed. The id is used

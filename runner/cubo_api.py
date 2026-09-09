@@ -29,13 +29,34 @@ class CmsError(RuntimeError):
 
 
 def _headers(token: str) -> dict:
-    return {
+    """Headers for a CMS API call.
+
+    An earlier version of this function sent only five headers and dismissed
+    the rest as "browser noise". That was wrong, and the API said so with a
+    403: something in front of it filters on the User-Agent, and
+    `Python-urllib/3.14` is an obvious bot. The first successful probe of this
+    endpoint went through PowerShell, whose default User-Agent begins with
+    `Mozilla/5.0` - so the check had been passing by accident all along.
+
+    The lesson generalises: replay what the browser sent, do not curate it.
+    `CUBO_USER_AGENT` is captured from the real request by
+    runner/import_curl.py; the `sec-fetch-*` values are constant for an XHR
+    and are sent as Chrome sends them.
+    """
+    headers = {
         'Accept': '*/*',
         'Authorization': f'Bearer {token}',
         'Content-Type': 'application/json',
         'Origin': config.ORIGIN,
         'Referer': config.REFERER,
+        'User-Agent': config.USER_AGENT,
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site',
     }
+    if config.ACCEPT_LANGUAGE:
+        headers['Accept-Language'] = config.ACCEPT_LANGUAGE
+    return headers
 
 
 def date_window(lookback_days: int = None, end: datetime = None):
@@ -50,16 +71,17 @@ def date_window(lookback_days: int = None, end: datetime = None):
     return start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
 
 
-def trigger_report(token: str, country_id: int, date_from: str, date_to: str,
-                   timeout: int = 60) -> dict:
-    """Ask the CMS to generate a transactions report. Returns request metadata.
+def report_url(country_id: int, date_from: str, date_to: str) -> str:
+    """The report request URL.
 
-    A 200 here means "queued", not "ready". The caller must then wait for the
-    email. Raises CmsError on anything else.
+    Separate from trigger_report so `cycle.py --show-request` prints the exact
+    URL that would be sent rather than a reconstruction of it. A diagnostic
+    that builds its own copy is a diagnostic that can agree with itself while
+    disagreeing with reality.
     """
     path = config.REPORT_PATH.format(country_id=country_id)
     # createdAt intentionally appears twice - that is how the API expresses a
-    # range. urlencode with doseq preserves the repetition.
+    # range. Passing a list of pairs preserves the repetition.
     query = urllib.parse.urlencode([
         ('createdAt', date_from),
         ('createdAt', date_to),
@@ -67,8 +89,17 @@ def trigger_report(token: str, country_id: int, date_from: str, date_to: str,
         ('countryId', str(country_id)),
         ('depositStatusFilter', 'ALL'),
     ])
-    url = f'{config.API_ROOT}{path}?{query}'
+    return f'{config.API_ROOT}{path}?{query}'
 
+
+def trigger_report(token: str, country_id: int, date_from: str, date_to: str,
+                   timeout: int = 60) -> dict:
+    """Ask the CMS to generate a transactions report. Returns request metadata.
+
+    A 200 here means "queued", not "ready". The caller must then wait for the
+    email. Raises CmsError on anything else.
+    """
+    url = report_url(country_id, date_from, date_to)
     req = urllib.request.Request(url, headers=_headers(token), method='GET')
     requested_at = datetime.now(timezone.utc)
     try:
@@ -85,7 +116,15 @@ def trigger_report(token: str, country_id: int, date_from: str, date_to: str,
     except urllib.error.HTTPError as e:
         hint = {
             401: 'Token rejected - it expired or was revoked. Re-capture it.',
-            403: 'Forbidden - the API may be checking Origin/Referer, or scope.',
+            403: (
+                'Forbidden. The token was accepted (that would be a 401), so '
+                'something in front of the API rejected the REQUEST - almost '
+                'always a header. Compare what we send against what the '
+                'browser sends:\n'
+                '    python3 runner/cycle.py --show-request\n'
+                '    python3 runner/import_curl.py --show-headers\n'
+                '  The User-Agent is the usual culprit; re-run import_curl.py '
+                'to capture the browser\'s own.'),
             404: f'No report endpoint for country id {country_id}.',
             429: 'Rate limited - too many report requests.',
         }.get(e.code, 'Unexpected status.')
