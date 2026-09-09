@@ -256,6 +256,50 @@ def test_a_found_report_is_downloaded_and_processed():
     assert processed['delete'] is True, 'a downloaded CSV must not survive'
 
 
+# ── The analysis window ──────────────────────────────────────────────────────
+
+def test_window_is_computed_in_local_time_not_utc():
+    """The CMS reads these dates in each country's own timezone, so they must
+    be built from local time.
+
+    Computed in UTC they rolled over five hours early every evening (Panama is
+    UTC-5), and the 19:00-23:00 slots asked for today-and-tomorrow instead of
+    yesterday-and-today - receiving 19-23 hours of data instead of 25-47.
+    Nothing looked wrong; the runs succeeded and the findings were real. Only
+    detections that need a full day to become visible went missing.
+    """
+    from datetime import date
+
+    start, end = cubo_api.date_window(1)
+    today = date.today()
+    assert end == today.strftime('%Y-%m-%d'), (
+        f'window ends {end}, but today is locally {today} - the dates are '
+        f'being computed in UTC again'
+    )
+    assert start == (today - timedelta(days=1)).strftime('%Y-%m-%d')
+
+
+def test_evening_slots_still_reach_back_a_full_day():
+    """The specific hours the UTC bug broke. At 19:00 local the window has to
+    still include yesterday, or the 24-hour fan-out detector runs under its
+    minimum."""
+    for hour in (0, 12, 19, 20, 22, 23):
+        evening = datetime(2026, 9, 12, hour, 0)
+        start, end = cubo_api.date_window(1, end=evening)
+        assert start == '2026-09-11', f'at {hour}:00 the window started {start}'
+        assert end == '2026-09-12', f'at {hour}:00 the window ended {end}'
+
+        # Hours of real data the API would return for that request.
+        hours = (evening - datetime(2026, 9, 11)).total_seconds() / 3600
+        assert hours >= 24, f'at {hour}:00 only {hours:.0f}h of data'
+
+
+def test_lookback_override_widens_the_window():
+    """The gap sweep after an outage longer than two days."""
+    start, end = cubo_api.date_window(7, end=datetime(2026, 9, 12, 10, 0))
+    assert (start, end) == ('2026-09-05', '2026-09-12')
+
+
 def test_country_id_matches_the_confirmed_mapping():
     """Confirmed against the live countries endpoint, not guessed. A wrong id
     would request the wrong country's data."""

@@ -64,9 +64,26 @@ def date_window(lookback_days: int = None, end: datetime = None):
 
     Inclusive of today by default. The API takes the range as `createdAt`
     repeated twice - first occurrence is the start, second is the end.
+
+    **Local time, not UTC.** The CMS interprets these dates in each country's
+    own timezone: midnight-to-midnight means real local midnight. Computing
+    them in UTC therefore rolled the date over five hours early every evening
+    (Panama is UTC-5), so the 19:00 through 23:00 slots asked for
+    today-and-tomorrow instead of yesterday-and-today and received 19-23 hours
+    of data rather than the 25-47 this window is supposed to guarantee. The
+    engine's longest hard window - card fan-out, slow tier - needs 24, so
+    those five slots were quietly running the detector under its minimum.
+
+    Nothing looked wrong: the runs succeeded, the findings were real, and only
+    the ones that needed the full day to become visible went unreported until
+    a later slot picked them up.
+
+    The Pi's timezone is therefore load-bearing, not cosmetic. It is set to
+    Panama; SV and GT are one hour further west, which shifts their boundary
+    by an hour and is well inside the window's slack.
     """
     lookback_days = lookback_days or config.LOOKBACK_DAYS
-    end = end or datetime.now(timezone.utc)
+    end = end or datetime.now()
     start = end - timedelta(days=lookback_days)
     return start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
 

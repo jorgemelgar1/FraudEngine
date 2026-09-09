@@ -90,9 +90,19 @@ from a merchant before it will look — a realistic chance to accumulate them.
 invisible to a two-day window. If that pattern matters, add a separate weekly
 sweep with a 7-day window; it is the same runner with different arguments.
 
-**To verify:** which timezone the API interprets those dates in. If it is UTC
-and we are UTC-6, "today" cuts differently than expected. Does not break
-anything, but the window boundaries should be understood rather than assumed.
+**Settled (2026-09-11):** the CMS interprets those dates in **each country's
+own timezone** — midnight-to-midnight is real local midnight. The Pi is set to
+Panama time, which is therefore load-bearing rather than cosmetic; SV and GT sit
+one hour further west, well inside this window's slack.
+
+That answer exposed a bug. `date_window()` had been computing the dates in UTC,
+so with Panama at UTC-5 the date rolled over five hours early and the **19:00
+through 23:00 slots asked for today-and-tomorrow instead of yesterday-and-today**
+— receiving 19-23 hours of data instead of 25-47, below the 24 the card fan-out
+slow tier requires. Nothing looked wrong: those runs succeeded and their findings
+were real. Only detections needing a full day to become visible went unreported
+until a later slot caught them. Fixed to use local time, with tests pinning the
+evening hours specifically.
 
 ---
 
@@ -267,7 +277,17 @@ the runner is live and the volume of retained findings grows.
 6. ~~**Trigger + scheduler**~~ **Done** — `runner/cycle.py` +
    `runner/cron-run.sh`, 16 tests. Needs the CMS token on the Pi and one
    crontab line.
-7. **UI additions** — `times_seen`, `source`. The only piece left.
+7. **Next up, after the context reset** — folded into one larger piece than
+   originally scoped, at the user's direction:
+   - **Separate automated runs from manual ones in the review list.** Right now
+     both land in the same undifferentiated queue. `analysis_runs.source`
+     already records which is which; nothing surfaces it.
+   - **A runner health dashboard.** What `cycle.py --health` reports, but in
+     the app instead of over SSH — last success per country, `times_seen` and
+     `first_seen_at` on findings, staleness visible without a terminal.
+   - **Slack notifications.** The CTO's endpoint and key are already in hand.
+     This is also the answer to the alerting gap below: one integration covers
+     both "fraud found" and "the runner died".
 
 Steps 1–4 are useful on their own, and now exist: you can analyze any report
 link you paste, which is already better than exporting and uploading by hand.
@@ -366,10 +386,16 @@ python3 runner/cycle.py --health     # which countries have gone quiet
 
 ## Still open
 
-- Timezone the API applies to `createdAt`
-- Gmail OAuth client — needs a Google Cloud project
 - Alerting channel when the runner fails. `cycle.py --health` reports which
   countries have gone quiet and exits non-zero, which is enough for a person
   to check but does not reach anyone by itself. The deferred Slack work is the
   obvious home for it.
-- Whether to add a weekly 7-day sweep for slow-burn merchants
+- Whether to add a weekly 7-day sweep for slow-burn merchants. One extra cron
+  line (`--lookback-days 7`) if the answer is yes; the reason it is not
+  automatic is that a merchant spreading six attempts over five days is
+  invisible to the two-day window, and nobody has confirmed that pattern
+  actually occurs.
+
+~~Gmail OAuth client~~ — done. The Google Cloud project exists and the app is
+**Internal**, so the refresh token does not expire and no verification is
+needed. Do not go looking for a "Publish app" button; Internal apps have none.
