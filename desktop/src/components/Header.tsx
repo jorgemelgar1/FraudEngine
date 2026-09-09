@@ -1,12 +1,12 @@
 import { signOut } from '../lib/auth';
 import type { UpdateState } from '../lib/updater';
 
-export type View = 'analyzer' | 'pendientes' | 'historial' | 'indicadores';
+export type View = 'analyzer' | 'pendientes' | 'historial' | 'indicadores' | 'runner';
 
 export function Header({
   view, setView, email, pendingCount,
   online, queueSize, draining, onSyncNow,
-  updateState, onInstallUpdate,
+  updateState, onInstallUpdate, runnerAlert,
 }: {
   view: View;
   setView: (v: View) => void;
@@ -18,6 +18,9 @@ export function Header({
   onSyncNow: () => void;
   updateState: UpdateState;
   onInstallUpdate: () => void;
+  // True when a country has gone quiet. The tab sits last because it is the
+  // least-visited one; the dot is what pulls the eye on the day it matters.
+  runnerAlert: boolean;
 }) {
   const showUpdatePill =
     updateState.status === 'available' || updateState.status === 'installing';
@@ -45,6 +48,15 @@ export function Header({
         </NavButton>
         <NavButton active={view === 'indicadores'} onClick={() => setView('indicadores')}>
           Indicadores
+        </NavButton>
+        <NavButton active={view === 'runner'} onClick={() => setView('runner')}>
+          Runner
+          {runnerAlert && (
+            <span
+              className="runner-alert-dot"
+              title="Un país lleva demasiado tiempo sin correr"
+            />
+          )}
         </NavButton>
       </nav>
 

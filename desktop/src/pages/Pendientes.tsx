@@ -12,6 +12,7 @@ type RunGroup = {
   csv_filename: string | null;
   csv_date_start: string | null;
   csv_date_end: string | null;
+  source: string | null;
   findings: PendingFinding[];
 };
 
@@ -148,6 +149,7 @@ export function Pendientes({
           csv_filename:   f.analysis_runs?.csv_filename || null,
           csv_date_start: f.analysis_runs?.csv_date_start || null,
           csv_date_end:   f.analysis_runs?.csv_date_end || null,
+          source:         f.analysis_runs?.source || null,
           findings:       [f],
         });
       }
@@ -187,11 +189,25 @@ export function Pendientes({
             <div className="group-head">
               <div>
                 <strong>{g.csv_filename || '(sin nombre)'}</strong>
+                {/* Which of these came from the robot is the first question
+                    anyone asks when a number looks wrong. The runner's email
+                    hints at it; `source` is what actually records it. */}
+                {g.source === 'auto' ? (
+                  <span className="tag origin auto" style={{ marginLeft: '0.6rem' }}>
+                    Automático
+                  </span>
+                ) : (
+                  <span className="tag origin manual" style={{ marginLeft: '0.6rem' }}>
+                    Manual
+                  </span>
+                )}
                 <div className="muted small">
                   {g.csv_date_start === g.csv_date_end
                     ? g.csv_date_start
                     : `${g.csv_date_start} → ${g.csv_date_end}`}
-                  {' · '}Subido por {g.run_by_email}
+                  {g.source === 'auto'
+                    ? ' · Generado por el runner'
+                    : ` · Subido por ${g.run_by_email}`}
                   {' · '}{g.findings.length} pendiente{g.findings.length === 1 ? '' : 's'}
                 </div>
               </div>

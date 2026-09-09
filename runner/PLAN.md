@@ -222,15 +222,38 @@ which.
 `source` matters for trust: when a number looks odd, being able to tell your
 own upload from the robot's run is the first debugging question.
 
-### Review UI (web + desktop)
-- Show `times_seen` / `first_seen_at` on pending findings
-- Show `source` on `/historial`
+### Database — migration 0012
+```
+runner_cycles                       one row per SCHEDULED CYCLE, any outcome
+  started_at / finished_at          a stuck 'running' row = died mid-cycle
+  country_code                      what was ASKED for
+  outcome / detail                  the vocabulary is a check constraint
+  run_id                            null unless the cycle produced an analysis
+  window_start / window_end         the dates requested from the CMS
+  token_expires_at / host
 
-Small, additive. No change to how review works.
+RPC finish_runner_cycle(id, ...)    closes a cycle on the DATABASE clock
+RPC runner_health()                 per-country last success, exactly
+```
+
+`runner_health()` is exact rather than derived from the last N rows, because a
+country failing for three days has its last success outside any window the
+client would fetch — which is the precise situation the tile exists to show.
+
+### Review UI (desktop)
+- **Runner section** — the health dashboard and the cycle timeline (step 7).
+- `times_seen` / `first_seen_at` on the findings inside each cycle.
+- `source` as an "Automático / Manual" chip on each group in Pendientes.
+
+### The Vercel web app
+- **Nothing, for now.** Its navigation is a row of links in each page footer
+  rather than a real nav bar, and the review team works in the desktop app.
+  Mirroring the Runner section there is a follow-up, not a prerequisite.
 
 ### The desktop app
-- **Nothing.** Teammates keep uploading manually. The runner writes to the same
-  tables, so its findings appear in everyone's Pendientes.
+- Teammates keep uploading manually and their flow is untouched. The runner
+  writes to the same tables, so its findings appear in everyone's Pendientes —
+  now labelled as the robot's.
 
 ---
 
@@ -277,17 +300,33 @@ the runner is live and the volume of retained findings grows.
 6. ~~**Trigger + scheduler**~~ **Done** — `runner/cycle.py` +
    `runner/cron-run.sh`, 16 tests. Needs the CMS token on the Pi and one
    crontab line.
-7. **Next up, after the context reset** — folded into one larger piece than
-   originally scoped, at the user's direction:
-   - **Separate automated runs from manual ones in the review list.** Right now
-     both land in the same undifferentiated queue. `analysis_runs.source`
-     already records which is which; nothing surfaces it.
-   - **A runner health dashboard.** What `cycle.py --health` reports, but in
-     the app instead of over SSH — last success per country, `times_seen` and
-     `first_seen_at` on findings, staleness visible without a terminal.
-   - **Slack notifications.** The CTO's endpoint and key are already in hand.
-     This is also the answer to the alerting gap below: one integration covers
-     both "fraud found" and "the runner died".
+7. ~~**The Runner section in the desktop app.**~~ **Done** — migration 0012,
+   `desktop/src/pages/Runner.tsx`, `desktop/src/lib/runner.ts`, 19 tests.
+   - **A cycle is not a run.** The enabling change was migration 0012's
+     `runner_cycles` table. `analysis_runs` only gets a row when a cycle
+     *succeeds*, so every interesting failure — the email never arrived, the
+     403, an expired token — wrote nothing to the database at all. That made
+     "the Pi is off", "cron is not firing" and "every cycle fails" the same
+     silence, which is the exact confusion this whole runner exists to
+     prevent, arriving through the UI. One row per cycle whatever the
+     outcome, written at the start and closed at the end, so a cycle that
+     dies mid-flight is distinguishable from one that never began.
+   - **Health dashboard**: a one-line status band, per-country tiles with a
+     pass/fail tick strip for the last eight slots, and the CMS token
+     countdown — which until now existed only as a warning line in a log file
+     on the Pi.
+   - **One timeline, not two lists.** A list of *runs* is precisely the list
+     that hides the failures, so the screen lists *cycles* and filters to
+     successes on request. Successful ones expand into their findings, with
+     `times_seen` finally surfaced; failed ones expand into the error and the
+     command that fixes it.
+   - **Automated vs manual** is now a chip on each group in Pendientes, keyed
+     off `analysis_runs.source` rather than the uploader's email.
+
+8. **Still to do** — **Slack notifications.** The CTO's endpoint and key are
+   already in hand. This is the answer to the alerting gap below: one
+   integration covers both "fraud found" and "the runner died", and
+   `runner_cycles` is already the row it would read.
 
 Steps 1–4 are useful on their own, and now exist: you can analyze any report
 link you paste, which is already better than exporting and uploading by hand.

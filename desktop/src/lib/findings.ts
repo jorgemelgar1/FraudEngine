@@ -24,7 +24,11 @@ const LIST_SELECT = [
   'review_notes',
   'watchlist_delta',
   'payload',
-  'analysis_runs(run_at,run_by_email,csv_filename,csv_date_start,csv_date_end)',
+  // `source` distinguishes the runner's own analyses from someone's manual
+  // upload (migration 0010). The runner's email already hints at it, but the
+  // column is what actually records it — an upload made from that address
+  // would otherwise be mislabelled.
+  'analysis_runs(run_at,run_by_email,csv_filename,csv_date_start,csv_date_end,source)',
 ].join(',');
 
 export type PendingFinding = {
@@ -53,6 +57,9 @@ export type PendingFinding = {
     csv_filename: string | null;
     csv_date_start: string | null;
     csv_date_end: string | null;
+    // 'auto' = the scheduled runner, 'manual' = someone uploaded a CSV.
+    // Optional: rows written before migration 0010 have no value.
+    source?: string | null;
   } | null;
 };
 

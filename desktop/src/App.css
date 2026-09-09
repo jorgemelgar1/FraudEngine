@@ -572,3 +572,283 @@ section h3 { margin: 0 0 0.75rem; }
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Runner
+   A dashboard is scanned and operated, not read, so state is encoded in
+   shape and colour as well as in numbers.
+
+   The three tones are SEMANTIC and deliberately separate from the Cubo
+   accent: teal means "this is Cubo", these mean "this is fine / this is
+   waiting / this is broken". Amber rather than red for the middle one is
+   load-bearing — a report that arrived late and a runner that is dead must
+   not look the same, or the red stops meaning anything.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --runner-ok:      #0E9F6E;
+  --runner-neutral: #B7791F;
+  --runner-bad:     var(--critical);
+  --runner-ok-bg:      #ECFDF5;
+  --runner-neutral-bg: #FEFAF0;
+  --runner-bad-bg:     #FEF2F2;
+}
+
+/* The one-glance answer. A band rather than a card: it is a statement about
+   the whole page, not another object on it. */
+.runner-status {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1.25rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  margin-bottom: 1rem;
+  font-size: 0.95rem;
+}
+.runner-status.good    { background: var(--runner-ok-bg);      border-color: #A7F3D0; }
+.runner-status.neutral { background: var(--runner-neutral-bg); border-color: #FDE7B8; }
+.runner-status.bad     { background: var(--runner-bad-bg);     border-color: #FECACA; }
+.runner-status-text { flex: 1; }
+.runner-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+.runner-status.good    .runner-status-dot { background: var(--runner-ok); }
+.runner-status.neutral .runner-status-dot { background: var(--runner-neutral); }
+.runner-status.bad     .runner-status-dot { background: var(--runner-bad); }
+
+/* Per-country, because staleness is per-country: one global light would hide
+   exactly the failure that happens. */
+.runner-countries {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.runner-country {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+/* The lift is spent only on the tile that needs attention. */
+.runner-country.stale {
+  border-color: #FECACA;
+  box-shadow: 0 0 0 1px #FECACA, var(--shadow-sm);
+}
+.runner-country-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.runner-country-code {
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  background: #F1F5F9;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+}
+.runner-country-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+.runner-country-ago {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.runner-country.stale .runner-country-ago { color: var(--runner-bad); }
+
+/* The highest-value element on the page: a country failing every slot for a
+   day is visible here in a way no number makes it. */
+.runner-ticks {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 16px;
+}
+.runner-tick {
+  width: 7px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.runner-tick.good    { background: var(--runner-ok); }
+.runner-tick.neutral { background: var(--runner-neutral); }
+.runner-tick.bad     { background: var(--runner-bad); }
+
+.runner-country-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+.runner-fail-count { color: var(--runner-bad); font-weight: 600; }
+
+/* Quieter than the tiles on purpose — these are reference values, not the
+   point of the page. */
+.runner-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 1.5rem;
+  overflow: hidden;
+}
+.runner-fact {
+  padding: 0.8rem 1.1rem;
+  border-left: 1px solid var(--border);
+}
+.runner-fact:first-child { border-left: 0; }
+.runner-fact-label { font-size: 0.75rem; color: var(--text-muted); }
+.runner-fact-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.15rem;
+}
+.runner-fact-value.bad     { color: var(--runner-bad); }
+.runner-fact-value.neutral { color: var(--runner-neutral); }
+.runner-fact-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.1rem; }
+
+/* ── The cycle timeline ─────────────────────────────────────────────────── */
+
+.cycle-list { padding: 0.5rem 0.75rem; }
+.cycle { border-bottom: 1px solid var(--border); }
+.cycle:last-child { border-bottom: 0; }
+
+.cycle-head {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 82px 34px 150px minmax(120px, 1fr) 90px 74px 18px;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem 0.5rem;
+  background: none;
+  border: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.cycle-head:hover { background: #F8FAFC; }
+.cycle-head:focus-visible { outline: 2px solid var(--cubo-teal); outline-offset: -2px; }
+
+.cycle-time {
+  display: flex;
+  flex-direction: column;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.cycle-day { font-weight: 400; }
+.cycle-country {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+.cycle-tx, .cycle-duration {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.cycle-caret { color: var(--text-muted); text-align: center; }
+
+/* State reads before the text does. */
+.tag.outcome { font-weight: 600; justify-self: start; }
+.tag.outcome.good    { background: var(--runner-ok-bg);      color: #065F46; }
+.tag.outcome.neutral { background: var(--runner-neutral-bg); color: #92400E; }
+.tag.outcome.bad     { background: var(--runner-bad-bg);     color: #991B1B; }
+
+.tag.review.pending  { background: #EFF6FF; color: #1D4ED8; }
+.tag.review.accepted { background: var(--runner-ok-bg); color: #065F46; }
+.tag.review.rejected { background: #F1F5F9; color: var(--text-muted); }
+.tag.review.na       { background: #F1F5F9; color: var(--text-muted); }
+
+.cycle-body {
+  padding: 0.35rem 0.5rem 1.25rem 0.5rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.cycle-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.6rem 1.5rem;
+  margin: 0;
+  padding: 0.85rem 1rem;
+  background: #F8FAFC;
+  border-radius: var(--radius-md);
+}
+.cycle-pair dt { font-size: 0.72rem; color: var(--text-muted); }
+.cycle-pair dd { margin: 0.1rem 0 0; font-size: 0.9rem; }
+.cycle-pair dd.warn { color: var(--runner-bad); font-weight: 600; }
+
+.cycle-detail {
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  background: var(--runner-bad-bg);
+  border-left: 3px solid var(--runner-bad);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+}
+.cycle.good .cycle-detail,
+.cycle.neutral .cycle-detail {
+  background: #F8FAFC;
+  border-left-color: var(--border);
+}
+
+/* The fix, next to the failure — so a broken cycle explains itself instead of
+   sending someone to find the runbook. */
+.cycle-fix {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  padding: 0.6rem 0.9rem;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+.cycle-fix.neutral { border-color: #FDE7B8; background: var(--runner-neutral-bg); }
+
+.cycle-findings-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.cycle-moved {
+  margin: 0;
+  padding: 0.55rem 0.8rem;
+  background: #F8FAFC;
+  border-radius: 6px;
+}
+.finding-sightings { margin-top: 0.3rem; }
+.cycle-readonly { margin: 0.2rem 0 0; }
+
+/* Nav badge — same idea as the pending count, but a state, not a number. */
+.runner-alert-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--critical);
+  display: inline-block;
+}
+
+/* Where a batch of findings came from. Quiet by design: it answers a
+   question people ask occasionally, so it must not compete with the merchant
+   names, which are what the screen is actually for. */
+.tag.origin { font-weight: 600; letter-spacing: 0.02em; }
+.tag.origin.auto   { background: #F0FBF8; color: #0F766E; }
+.tag.origin.manual { background: #F1F5F9; color: var(--text-muted); }

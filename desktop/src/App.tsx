@@ -13,10 +13,12 @@ import {
 } from './lib/updater';
 import { Header, type View } from './components/Header';
 import { LoginScreen } from './components/LoginScreen';
+import { runnerHealth, isStale } from './lib/runner';
 import { Analyzer } from './pages/Analyzer';
 import { Pendientes } from './pages/Pendientes';
 import { Historial } from './pages/Historial';
 import { Indicadores } from './pages/Indicadores';
+import { Runner } from './pages/Runner';
 
 // App is the shell: it owns auth state, the active view, online/offline
 // status, and the pending-count + sync-queue badges in the header. Each
@@ -29,6 +31,7 @@ export default function App() {
 
   const [view, setView] = useState<View>('analyzer');
   const [pendingCnt, setPendingCnt] = useState<number | null>(null);
+  const [runnerAlert, setRunnerAlert] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateState>({ status: 'idle' });
 
   // Network state — defaults to true and tracks browser online/offline
@@ -109,6 +112,23 @@ export default function App() {
   }, [session]);
 
   useEffect(() => { refreshPendingCount(); }, [refreshPendingCount]);
+
+  // The Runner tab's warning dot. Re-checked on every navigation rather than
+  // on a timer: it is one small RPC, and a badge that is itself stale is
+  // worse than no badge. Failures are swallowed on purpose — before migration
+  // 0012 is applied this RPC does not exist, and the correct behaviour then
+  // is simply not to show a dot.
+  const refreshRunnerAlert = useCallback(async () => {
+    if (!session || !online) return;
+    try {
+      const health = await runnerHealth();
+      setRunnerAlert(health.length > 0 && health.some(isStale));
+    } catch {
+      setRunnerAlert(false);
+    }
+  }, [session, online]);
+
+  useEffect(() => { refreshRunnerAlert(); }, [refreshRunnerAlert, view]);
 
   // One-shot update check at app startup. Re-runs if the user signs out
   // and back in (rare but harmless). We only show UI for 'available' and
@@ -204,6 +224,7 @@ export default function App() {
         onSyncNow={handleDrain}
         updateState={updateState}
         onInstallUpdate={handleInstallUpdate}
+        runnerAlert={runnerAlert}
       />
       {view === 'analyzer' && (
         <Analyzer
@@ -224,6 +245,7 @@ export default function App() {
       {view === 'indicadores' && (
         <Indicadores session={session} online={online} />
       )}
+      {view === 'runner' && <Runner online={online} />}
     </div>
   );
 }
