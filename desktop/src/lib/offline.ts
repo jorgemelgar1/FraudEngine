@@ -97,6 +97,48 @@ export async function updateQueueItem(id: string, patch: Partial<QueuedRun>): Pr
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Clearing on sign-out
+// ─────────────────────────────────────────────────────────────────────────
+
+// Both stores hold cardholder data: the watchlist cache carries BINs and
+// last-4 pairs, and a queued run carries the full findings payload, evidence
+// rows included. Signing out used to clear the Supabase session and leave
+// both files sitting in %APPDATA% forever, so a laptop that left the company
+// kept them. Now sign-out takes them with it.
+//
+// Returns how many queued runs were discarded, so the caller can warn first —
+// those are analyses that never reached Supabase and cannot be recovered.
+export async function clearLocalCaches(): Promise<number> {
+  let discarded = 0;
+  try {
+    discarded = (await readQueue()).length;
+  } catch {
+    // A corrupt or missing queue file is not a reason to skip the wipe.
+  }
+  for (const name of [WATCHLIST_STORE, QUEUE_STORE]) {
+    try {
+      const store = await Store.load(name);
+      await store.clear();
+      await store.save();
+    } catch {
+      // Best effort: one unreadable store must not stop the other from
+      // being cleared, and must never block the sign-out itself.
+    }
+  }
+  return discarded;
+}
+
+// How many analyses are waiting to upload. Read before signing out so the
+// user can be told what they are about to lose.
+export async function pendingSyncCount(): Promise<number> {
+  try {
+    return (await readQueue()).length;
+  } catch {
+    return 0;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Network error classification
 // ─────────────────────────────────────────────────────────────────────────
 

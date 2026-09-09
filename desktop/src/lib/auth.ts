@@ -1,6 +1,7 @@
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import { supabase } from './supabase';
+import { clearLocalCaches } from './offline';
 import { ALLOWED_EMAIL_DOMAIN, OAUTH_REDIRECT_URL } from './config';
 
 // Two-step PKCE OAuth flow for desktop:
@@ -93,5 +94,10 @@ export async function registerOAuthCallbackHandler(
 }
 
 export async function signOut(): Promise<void> {
+  // Before the session goes, not after: if signOut throws we still want the
+  // cardholder data off this machine. Both caches are local copies of data
+  // that lives in Supabase, so clearing them loses nothing a signed-in user
+  // cannot fetch again — except queued runs, which the UI warns about first.
+  await clearLocalCaches();
   await supabase.auth.signOut();
 }

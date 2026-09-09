@@ -1,4 +1,5 @@
 import { signOut } from '../lib/auth';
+import { pendingSyncCount } from '../lib/offline';
 import type { UpdateState } from '../lib/updater';
 
 export type View = 'analyzer' | 'pendientes' | 'historial' | 'indicadores' | 'runner';
@@ -97,7 +98,24 @@ export function Header({
         title={online ? 'En línea' : 'Sin conexión'}
       />
       <span className="user-badge">{email}</span>
-      <button className="btn ghost small" onClick={() => signOut()}>
+      <button
+        className="btn ghost small"
+        onClick={async () => {
+          // Signing out wipes the local caches, and one of them holds runs
+          // that never reached Supabase. Say so before destroying them.
+          const pending = await pendingSyncCount();
+          if (
+            pending > 0 &&
+            !confirm(
+              `Hay ${pending} análisis sin subir. Al cerrar sesión se ` +
+              `borran de este equipo y no se pueden recuperar. ¿Cerrar sesión?`,
+            )
+          ) {
+            return;
+          }
+          await signOut();
+        }}
+      >
         Cerrar sesión
       </button>
     </header>
