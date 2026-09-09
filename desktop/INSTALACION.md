@@ -61,10 +61,19 @@ acepta. Solo se pregunta la primera vez.
 - **Analizar:** arrastra un CSV (de cualquier tamaño) a la ventana o haz
   clic para examinarlo. El análisis corre localmente en tu PC y los
   resultados se sincronizan con Supabase como siempre.
-- **Pendientes:** revisa los hallazgos críticos pendientes — Aceptar
-  agrega el merchant a la watchlist, Descartar lo deja como falso positivo.
-- **Historial:** consulta decisiones anteriores. Tienes 24 horas para
-  deshacer una decisión.
+- **Pendientes:** la cola de revisión, un comercio por línea y los de mayor
+  riesgo arriba. Al abrir uno verás, en español, por qué se marcó. Dos
+  decisiones: **Confirmar fraude** lo agrega a la watchlist, **No es fraude**
+  lo descarta y te pide el motivo de una lista corta. Si un comercio ya se
+  había descartado antes y volvió, un aviso lo dice y explica por qué volvió.
+- **Historial:** dos pestañas.
+  - *Reportes* — cada análisis con sus números y sus hallazgos. Puedes
+    cambiar una decisión pasadas las 24 horas escribiendo una explicación,
+    que queda en el expediente. Arriba, qué tan seguido acierta el motor.
+  - *Watchlist* — por fin visible. Busca comercios, tarjetas, BIN, correos o
+    nombres; abre un comercio para ver todo su historial; y retira a alguien
+    de la lista si resultó no ser fraude. Retirar no borra nada: deja de
+    contar en los análisis pero el registro se conserva como constancia.
 - **Runner:** el estado del robot que pide y analiza los reportes solo, cada
   hora, rotando entre El Salvador, Panamá y Guatemala. Arriba dice de un
   vistazo si está al día; abajo está cada ciclo, con sus hallazgos si
