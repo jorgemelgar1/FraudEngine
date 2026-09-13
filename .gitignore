@@ -49,3 +49,22 @@ runner/.env
 # backup of a service-role key is exactly as dangerous as the original.
 runner/.env.backup
 *.env.backup
+
+# Database backups. These are never written here - backup-database.ps1 refuses
+# a destination inside the repo and defaults to ~/Cubo Pago Backups - but
+# restore-database.ps1 -ExtractTo will put a *decrypted* dump wherever it is
+# pointed, and a decrypted dump is card BINs, last-4s and reviewer emails in
+# the clear. This repo is public. Belt and braces.
+*.cubobak
+cubo-data_*.json
+
+# Local security write-ups. A document called "informe de seguridad" in a
+# PUBLIC repo is a findings list with a map attached. Kept out of git so a
+# stray `git add -A` cannot publish it; delete this line if one is ever meant
+# to be shared deliberately.
+informe_seguridad.docx
+*_seguridad.docx
+
+# Supabase CLI scratch state (version checks, local project links).
+supabase/.temp/
+supabase/.branches/

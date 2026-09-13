@@ -4,3 +4,17 @@
 # imports packages that only exist inside desktop/node_modules), and
 # shaves the uploaded payload by ~80 MB.
 desktop/
+
+# Database backups. .gitignore does not apply to `vercel` CLI deploys - when a
+# .vercelignore exists, Vercel uses this file instead and uploads the working
+# directory as-is. Anything matched in .gitignore for data-protection reasons
+# has to be repeated here or the CLI path quietly bypasses it.
+*.cubobak
+cubo-data_*.json
+.env
+.env.local
+runner/.env
+runner/work/
+runner/*.csv
+*.dpapi
+*.env.backup
