@@ -41,6 +41,22 @@ def _read(path):
         return fh.read()
 
 
+# Matches a real import STATEMENT at the start of a line, not the word "import"
+# wherever it appears. The first version of this scanned the whole file, so the
+# sentence "neither can import the other's" in a comment matched, swallowed the
+# newlines up to the next `from '...'`, and reported the wrong thing about the
+# wrong line.
+_IMPORT_RE = re.compile(
+    r"^\s*import\s+(?P<type>type\s+)?[^;]*?from\s+'(?P<target>[^']+)'",
+    re.M)
+
+
+def _imports_of(path):
+    """(is_type_only, module) for every import statement in a file."""
+    return [(bool(m.group('type')), m.group('target'))
+            for m in _IMPORT_RE.finditer(_read(path))]
+
+
 def _split_top_level(flat):
     """Split a PostgREST select on commas that are not inside parentheses, so
     an embedded join like analysis_runs(a,b,c) stays one item."""
@@ -132,11 +148,7 @@ def test_shared_modules_import_from_neither_app():
     for name in sorted(os.listdir(_SHARED)):
         if not name.endswith('.ts'):
             continue
-        src = _read(os.path.join(_SHARED, name))
-        for m in re.finditer(r"from '([^']+)'", src):
-            target = m.group(1)
-            if not target.startswith('.') and not target.startswith('@shared'):
-                continue        # a bare package name is fine
+        for _is_type, target in _imports_of(os.path.join(_SHARED, name)):
             if 'desktop' in target or target.startswith('@/'):
                 offenders.append(f'{name} -> {target}')
     assert not offenders, (
@@ -151,10 +163,16 @@ def test_shared_modules_are_framework_free():
     for name in sorted(os.listdir(_SHARED)):
         if not name.endswith('.ts'):
             continue
-        src = _read(os.path.join(_SHARED, name))
-        for m in re.finditer(r"from '([^']+)'", src):
-            if any(m.group(1).startswith(b) for b in banned):
-                offenders.append(f'{name} -> {m.group(1)}')
+        for is_type, target in _imports_of(os.path.join(_SHARED, name)):
+            if not any(target.startswith(b) for b in banned):
+                continue
+            # A type-only import is erased at compile time: no runtime
+            # dependency, no bundle weight. shared/history.ts may therefore
+            # name SupabaseClient as a type while still taking the client as
+            # an argument rather than constructing one — which is the point.
+            if is_type:
+                continue
+            offenders.append(f'{name} -> {target}')
     assert not offenders, 'shared/ must stay framework-free: %s' % offenders
 
 
