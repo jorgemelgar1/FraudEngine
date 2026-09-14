@@ -68,3 +68,9 @@ informe_seguridad.docx
 # Supabase CLI scratch state (version checks, local project links).
 supabase/.temp/
 supabase/.branches/
+
+# The project wiki. Local by design: it describes internal architecture, the
+# Pi's layout and operational procedure. None of that is a credential, but
+# together it is a map, and this repo is PUBLIC. If someone else needs it,
+# copy it to them deliberately rather than committing it.
+PROJECT-WIKI.md
