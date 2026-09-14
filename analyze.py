@@ -479,10 +479,53 @@ def _force_identifier_dtypes(df):
     return df
 
 
+def _collapse_to_attempts(df):
+    """Reduce the raw CSV to one row per ATTEMPT, carrying its final status.
+
+    The raw export has a row per status transition (DRAFT → PENDING →
+    REJECTED/SUCCEEDED), and one payment can carry SEVERAL attempts under a
+    single transaction_id — a card declined, then a different card, or the
+    same card retried on another channel.
+
+    Those are two different kinds of duplicate and only one of them is noise.
+    Collapsing by transaction_id alone removed both, so a fraud-coded decline
+    followed by a successful retry became a single successful row and the
+    pattern disappeared entirely. Whether the engine saw an attack came down
+    to whether the processor happened to issue one transaction_id or two.
+
+    The attempt is the real unit: (transaction_id, last_intent_at, card).
+    last_intent_at moves per attempt and is constant across one attempt's
+    status transitions, which is exactly what distinguishes the two cases.
+
+    Collapsing by highest status rank also fixes a quieter bug. The old sort
+    was by last_intent_at and took the last row, so when an attempt's DRAFT
+    and REJECTED rows shared a timestamp, which one survived depended on the
+    order they happened to appear in the file.
+    """
+    out = df.copy()
+    # NaN-safe composite key as a string, so rows with a missing card are not
+    # silently dropped by a groupby over NaN.
+    card_keys = pd.Series(_compute_card_keys(out), index=out.index)
+    out['_attempt_id'] = (
+        out['transaction_id'].astype('string').fillna('') + '|'
+        + out['last_intent_at'].astype('string').fillna('') + '|'
+        + card_keys.astype('string').fillna('')
+    )
+    out['_rank'] = out['status'].map(_STATUS_RANK).fillna(0)
+    out = out.sort_values('_rank', kind='stable')
+    out = out.groupby('_attempt_id', sort=False).tail(1).copy()
+    # When this attempt happened, as opposed to when the payment was created.
+    # Several attempts share one transaction_created_at; timing anything
+    # per-attempt on that column collapses a slow grind into a burst.
+    out['_attempt_time'] = out['last_intent_at'].fillna(out['transaction_created_at'])
+    return out
+
+
 def load_and_dedupe(csv_path):
     """
-    Load the CSV and deduplicate to one row per transaction_id
-    (keeping the final status transition).
+    Load the CSV and reduce it to one row per ATTEMPT, keeping that attempt's
+    final status. See _collapse_to_attempts for why the attempt rather than
+    the transaction is the unit.
 
     Schema is validated immediately after the CSV is parsed and before any
     columns are touched — otherwise a missing required column raises
@@ -498,7 +541,7 @@ def load_and_dedupe(csv_path):
     df['last_intent_at'] = pd.to_datetime(df['last_intent_at'], errors='coerce')
     df['transaction_created_at'] = pd.to_datetime(df['transaction_created_at'], errors='coerce')
     df = df.sort_values(['transaction_id', 'last_intent_at'])
-    df_u = df.groupby('transaction_id').tail(1)
+    df_u = _collapse_to_attempts(df)
     # Sort globally by timestamp once so downstream detectors can skip re-sorting.
     df_u = df_u.sort_values('transaction_created_at', kind='stable').reset_index(drop=True)
     df_u['card_key'] = _compute_card_keys(df_u)
@@ -1141,34 +1184,14 @@ def _build_attempts(df_raw):
     transaction_id-level dedupe would merge are preserved here.
 
     Local to this detector — does not mutate df_raw or df_u.
-    """
-    df = df_raw.copy()
-    df['_card_key'] = _compute_card_keys(df)
-    # Composite, NaN-safe attempt id (string) so rows with a missing card_key
-    # are not silently dropped by a groupby on NaN keys.
-    txid = df['transaction_id'].astype('string').fillna('')
-    li = df['last_intent_at'].astype('string').fillna('')
-    ck = df['_card_key'].astype('string').fillna('')
-    df['_attempt_id'] = txid + '|' + li + '|' + ck
-    df['_rank'] = df['status'].map(_STATUS_RANK).fillna(0)
-    # Keep the terminal (highest-rank) row per attempt.
-    df = df.sort_values('_rank', kind='stable')
-    attempts = df.groupby('_attempt_id', sort=False).tail(1).copy()
 
-    # When each attempt happened, as opposed to when the payment was created.
-    #
-    # These are different clocks and the difference matters: several attempts
-    # on one transaction_id all share a single transaction_created_at. Timing
-    # the card fan-out on that column made six attempts spread over ten hours
-    # look like six cards inside five minutes, which is the top burst tier and
-    # scores 40 points. last_intent_at moves per attempt, which is also why
-    # _attempt_id is keyed on it two lines above.
-    #
-    # Falls back to transaction_created_at where last_intent_at is missing, so
-    # a partially-populated export degrades to the old behaviour rather than
-    # dropping the row from the window scan entirely.
-    attempts['_attempt_time'] = attempts['last_intent_at'].fillna(
-        attempts['transaction_created_at'])
+    Shares _collapse_to_attempts with load_and_dedupe so the two halves of the
+    engine cannot disagree about what one row means. They used to: this
+    detector counted attempts while the main model counted transactions, which
+    is why a merchant could be Critical here and invisible there.
+    """
+    attempts = _collapse_to_attempts(df_raw)
+    attempts['_card_key'] = _compute_card_keys(attempts)
     return attempts
 
 
@@ -2675,6 +2698,16 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
                 'description_es': description,
                 'action_code': 'MONITOR',
                 'evidence_count': n_total,
+                # The rows that triggered it, same as a Critical finding gets.
+                # Without these a Monitor finding was a score and a sentence
+                # with nothing behind them: an analyst opening one in Historial
+                # could not check the claim, only believe it.
+                #
+                # This cannot reach the watchlist. _accept_one_finding
+                # (migration 0004) refuses anything whose review_status is not
+                # 'pending' and anything whose confidence is not 'Critical',
+                # and Monitor findings fail both tests.
+                'evidence': evidence,
                 'indicator_hits': merchant_indicator_hits,
             })
 
@@ -2783,7 +2816,15 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
             'end': str(date_end)[:10] if pd.notna(date_end) else None,
         },
         'total_rows': len(df_raw),
-        'unique_transactions': len(df_u),
+        # Distinct payments, which is what this has always meant and what the
+        # dashboard renders as "Transacciones". df_u is now one row per
+        # ATTEMPT, so len(df_u) would quietly start counting something else —
+        # the number would grow and nobody would know why.
+        'unique_transactions': int(df_u['transaction_id'].nunique()),
+        # Attempts against those payments. Equal to unique_transactions unless
+        # a payment carries retries, which is exactly the case the engine used
+        # to lose.
+        'total_attempts': len(df_u),
         'status_counts': df_u['status'].value_counts().to_dict(),
         'total_amount_attempted': round(float(df_u['amount'].sum()), 2),
         'total_amount_succeeded': round(float(df_u[df_u['status'] == 'SUCCEEDED']['amount'].sum()), 2),

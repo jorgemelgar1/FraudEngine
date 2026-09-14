@@ -288,6 +288,85 @@ def test_attempts_hours_apart_are_not_a_five_minute_burst():
 
 # ── Unresolved sessions ──────────────────────────────────────────────────────
 
+def _retry_pair(shared_id):
+    """A fraud-coded decline, then a successful retry on another channel two
+    minutes later. With `shared_id` both attempts carry one transaction_id,
+    which is how the export represents a retry against the same payment."""
+    tx_b = 'TX1' if shared_id else 'TX2'
+    return [
+        _row(transaction_id='TX1', company_name='RETRY', amount='500',
+             status='REJECTED', transaction_type='POS',
+             transaction_created_at=_stamp(0), last_intent_at=_stamp(0),
+             card_last_digits='4242', bin_card_number='411111',
+             card_holder='JUAN PEREZ', rejection_reason='05 - SOSPECHA DE FRAUDE',
+             ip='5.5.5.5', client_name='Juan', client_email='j@x.com'),
+        _row(transaction_id=tx_b, company_name='RETRY', amount='500',
+             status='SUCCEEDED', transaction_type='LINK',
+             transaction_created_at=_stamp(2), last_intent_at=_stamp(2),
+             card_last_digits='4242', bin_card_number='411111',
+             card_holder='JUAN PEREZ', rejection_reason='',
+             ip='5.5.5.5', client_name='Juan', client_email='j@x.com'),
+    ]
+
+
+def test_a_retry_is_kept_whether_or_not_it_shares_a_transaction_id():
+    """Deduplication used to collapse by transaction_id alone, which removed
+    two different kinds of duplicate: a payment's DRAFT/PENDING/final status
+    rows (noise) and its separate ATTEMPTS (evidence).
+
+    A decline followed by a successful retry therefore became one successful
+    row, and the pattern vanished. Whether the engine saw the attack came down
+    to whether the processor issued one transaction_id or two — nothing about
+    the fraud itself."""
+    results = {}
+    for shared in (False, True):
+        path = _write(_retry_pair(shared), 'retry-%s.csv' % shared)
+        _, df_u = analyze.load_and_dedupe(path)
+        out = analyze.analyze(path)
+        findings = [f for f in _all_findings(out) if f['company_name'] == 'RETRY']
+        results[shared] = {
+            'rows': len(df_u),
+            'switches': len(analyze.detect_channel_switch(df_u)),
+            'fingerprints': sorted(findings[0]['fingerprints']) if findings else [],
+            'score': findings[0]['risk_score'] if findings else None,
+        }
+
+    assert results[True]['rows'] == 2, \
+        'the retry was collapsed away: %d row(s) survived' % results[True]['rows']
+    assert results[True] == results[False], \
+        'one transaction_id gives a different answer than two:\n  two: %s\n  one: %s' % (
+            results[False], results[True])
+    assert 'channel_switch_retry' in results[True]['fingerprints'], results[True]
+
+
+def test_transaction_and_attempt_counts_stay_distinct():
+    """df_u is now one row per attempt, so `unique_transactions` — which the
+    dashboard renders as "Transacciones" — must still count payments. Reusing
+    len(df_u) would have quietly inflated it."""
+    out = analyze.analyze(_write(_retry_pair(shared_id=True), 'counts.csv'))
+    assert out['summary']['unique_transactions'] == 1, out['summary']['unique_transactions']
+    assert out['summary']['total_attempts'] == 2, out['summary']['total_attempts']
+
+
+def test_monitor_findings_carry_the_rows_that_triggered_them():
+    """A Monitor finding used to be a score and a sentence with nothing behind
+    them — an analyst opening one in Historial could not check the claim.
+
+    Evidence here is safe: _accept_one_finding (migration 0004) refuses any
+    finding whose review_status is not 'pending' and whose confidence is not
+    'Critical', and Monitor findings fail both, so these rows can never reach
+    the watchlist."""
+    out = analyze.analyze(_write(_retry_pair(shared_id=False), 'monitorev.csv'))
+    monitors = [f for f in out['monitor_findings']]
+    assert monitors, 'this fixture is meant to produce a Monitor finding'
+    for f in monitors:
+        assert 'evidence' in f, 'Monitor finding has no evidence key'
+        assert f['evidence'], 'Monitor finding has an empty evidence list'
+        assert 'evidence_count' in f, 'evidence_count was dropped'
+        for e in f['evidence']:
+            assert 'transaction_id' in e and 'status' in e, e
+
+
 def test_pending_only_session_cannot_reach_critical():
     """PENDING means the payment has not resolved. Six pending checkouts used
     to score Critical/100 with no decline and no aging rule, which is
