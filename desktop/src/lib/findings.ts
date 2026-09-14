@@ -1,5 +1,16 @@
 import { supabase } from './supabase';
 
+// Pure review logic lives at the repo root so the web app can apply the same
+// rules — it used to live here, which is why the browser queue could not show
+// re-openings, the seen count or a country tag. Re-exported rather than moved
+// outright so every existing import of this module keeps working unchanged.
+export {
+  countryCodeOf, reopenInfo, type ReopenInfo,
+  hoursSince, fmtAge, fmtDay, fmtCurrency,
+  seenLine, exposureScope, zeroSettlementSummary, evidenceOf,
+  isStalePending, STALE_AFTER_HOURS,
+} from '@shared/review';
+
 // Columns + join the review UI needs. Mirrors api/findings.py:_LIST_SELECT so
 // the desktop pages render the same fields as the Vercel ones. Keep this in
 // sync if the Vercel select ever grows; otherwise the two clients silently
@@ -39,20 +50,6 @@ const LIST_SELECT = [
   // country, so the queue has to be able to say which one this is.
   'analysis_runs(run_at,run_by_email,csv_filename,csv_date_start,csv_date_end,source,currency_source)',
 ].join(',');
-
-// Normalized country name (what analyze.py stores) -> the code ops uses.
-// Mirrors runner/config.py:COUNTRIES; an unmapped country returns null rather
-// than a guess, exactly as the currency logic does.
-const COUNTRY_CODES: Record<string, string> = {
-  'panama': 'PA',
-  'el salvador': 'SV',
-  'guatemala': 'GT',
-};
-
-export function countryCodeOf(currencySource: string | null | undefined): string | null {
-  if (!currencySource) return null;
-  return COUNTRY_CODES[currencySource.trim().toLowerCase()] || null;
-}
 
 export type PendingFinding = {
   id: string;
@@ -99,47 +96,6 @@ export type PendingFinding = {
     currency_source?: string | null;
   } | null;
 };
-
-export type ReopenInfo = {
-  rejectedAt: string;
-  rejectedBy: string | null;
-  reason: string | null;
-};
-
-// Pulls the most recent automatic re-opening out of review_notes.
-//
-// reopen_finding APPENDS with ' | ', so a finding re-opened twice carries both
-// entries and the last one is the current story. A human Undo overwrites the
-// column instead — but it also clears reviewed_at, so those rows never reach
-// here.
-// Anchored on "UTC:" rather than on the first colon, because the timestamp
-// migration 0010 writes is `YYYY-MM-DD HH24:MI` — it CONTAINS a colon. Cutting
-// at the first one turned "…14:00 UTC: el puntaje subió de 45 a 90" into a
-// reason that read "00 UTC: el puntaje subió de 45 a 90".
-// tests/test_reopen_note_contract.py pins this against the SQL.
-const REOPEN_RE = /^Reabierto autom[áa]ticamente .*?UTC:\s*(.+)$/;
-
-// The note ends with "(puntaje anterior 45, ahora 90)", which just restates
-// what the sentence before it already said. Dropped: the current score is on
-// the row anyway.
-const TRAILING_SCORES = /\s*\(puntaje anterior[^)]*\)\s*$/;
-
-export function reopenInfo(f: PendingFinding): ReopenInfo | null {
-  if (!f.reviewed_at) return null;
-  let reason: string | null = null;
-  for (const part of (f.review_notes || '').split(' | ').reverse()) {
-    const m = part.trim().match(REOPEN_RE);
-    if (m) {
-      reason = m[1].replace(TRAILING_SCORES, '').trim();
-      break;
-    }
-  }
-  return {
-    rejectedAt: f.reviewed_at,
-    rejectedBy: f.reviewed_by_email || null,
-    reason,
-  };
-}
 
 export type HistoryFinding = PendingFinding & {
   review_status: 'accepted' | 'rejected';

@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { describePattern, rankPatterns, verdictFor } from '@/shared/patterns';
 
 type HistoryFinding = {
   id: string;
@@ -235,9 +236,20 @@ export default function HistorialPage() {
                               </span>
                             )}
                           </div>
+                          {/* Was a comma-joined list of engine codes. Ranked
+                              and translated through shared/patterns.ts, so
+                              Historial reads the same as the desktop's. The
+                              verdict leads because in a dense table it is the
+                              only line most people read. */}
                           <div className="muted" style={{ fontSize: '0.8rem' }}>
-                            {(f.fingerprints || []).slice(0, 3).join(', ')}
-                            {f.fingerprints.length > 3 ? '…' : ''}
+                            {verdictFor(f.finding_type)}
+                          </div>
+                          <div className="muted" style={{ fontSize: '0.8rem' }}>
+                            {rankPatterns(f.fingerprints || [])
+                              .slice(0, 3)
+                              .map(fp => describePattern(fp).label)
+                              .join(' · ')}
+                            {(f.fingerprints || []).length > 3 ? ' …' : ''}
                           </div>
                         </td>
                         <td style={{ padding: '0.5rem 0.4rem' }}>{f.risk_score}</td>

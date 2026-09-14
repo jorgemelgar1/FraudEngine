@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, DragEvent, KeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { describePattern, rankPatterns, verdictFor } from '@/shared/patterns';
 
 type EvidenceRow = {
   transaction_id: string;
@@ -766,6 +767,12 @@ function FindingCard({
           <span className="muted" style={{ marginLeft: '0.75rem' }}>
             Riesgo: {finding.risk_score}
           </span>
+          {/* One line saying what this finding claims, before the numbers.
+              verdictFor() maps the engine's finding_type through the shared
+              dictionary — the same verdict the desktop shows. */}
+          <div className="muted" style={{ fontSize: '0.85rem', marginTop: '0.15rem' }}>
+            {verdictFor(finding.type)}
+          </div>
         </div>
         {/* Review controls only render for Critical (onAccept/onReject are
             only passed in for that tier). Monitor cards show no buttons. */}
@@ -801,10 +808,12 @@ function FindingCard({
         )}
       </div>
       <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>{finding.description_es}</p>
+      {/* Named signals, not engine codes. Same dictionary the desktop uses —
+          see shared/patterns.ts. Ranked so the most telling one leads. */}
       <div>
-        {(finding.fingerprints || []).map((fp) => (
-          <span className="tag" key={fp}>
-            {fp}
+        {rankPatterns(finding.fingerprints || []).map((fp) => (
+          <span className="tag" key={fp} title={describePattern(fp).explain}>
+            {describePattern(fp).label}
           </span>
         ))}
       </div>
@@ -861,6 +870,12 @@ function RejectedMerchantCard({
           <span className="muted" style={{ marginLeft: '0.75rem' }}>
             Riesgo: {finding.risk_score}
           </span>
+          {/* One line saying what this finding claims, before the numbers.
+              verdictFor() maps the engine's finding_type through the shared
+              dictionary — the same verdict the desktop shows. */}
+          <div className="muted" style={{ fontSize: '0.85rem', marginTop: '0.15rem' }}>
+            {verdictFor(finding.type)}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
           {badge ? (
@@ -896,8 +911,10 @@ function RejectedMerchantCard({
         {fmtCurrency(m.rejected_amount, finding.currency || currency)}
       </div>
       <div>
-        {(finding.fingerprints || []).map((fp) => (
-          <span className="tag" key={fp}>{fp}</span>
+        {rankPatterns(finding.fingerprints || []).map((fp) => (
+          <span className="tag" key={fp} title={describePattern(fp).explain}>
+            {describePattern(fp).label}
+          </span>
         ))}
       </div>
       {finding.recommended_action_es && (

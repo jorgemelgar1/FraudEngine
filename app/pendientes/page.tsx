@@ -4,6 +4,11 @@ import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { describePattern, rankPatterns, verdictFor, actionFor } from '@/shared/patterns';
+import {
+  countryCodeOf, reopenInfo, seenLine, isStalePending, fmtAge, fmtDay,
+  fmtCurrency, exposureScope, zeroSettlementSummary, evidenceOf,
+} from '@/shared/review';
 
 type PendingFinding = {
   id: string;
@@ -20,13 +25,30 @@ type PendingFinding = {
   chargeback_exposure_usd: number | null;
   chargeback_exposure_currency: string | null;
   description_es: string | null;
+  // What the engine recommends doing. Rendered through actionFor() so the
+  // wording lives in the shared dictionary rather than in this file.
+  action_code: string | null;
   payload: Record<string, unknown>;
+  // Deduplication bookkeeping (migration 0010). A finding that keeps coming
+  // back is a different thing from a new one, and the queue could not say so
+  // until the API started selecting these.
+  times_seen: number | null;
+  first_seen_at: string | null;
+  // Review history — reopenInfo() reads these to tell a finding that was
+  // dismissed and returned from one nobody has touched.
+  reviewed_at: string | null;
+  reviewed_by_email: string | null;
+  review_notes: string | null;
   analysis_runs: {
     run_at: string;
     run_by_email: string;
     csv_filename: string | null;
     csv_date_start: string | null;
     csv_date_end: string | null;
+    // Which country's data this run covered, and whether it came from the
+    // Pi runner or someone's manual upload.
+    currency_source: string | null;
+    source: string | null;
   } | null;
 };
 
@@ -39,64 +61,6 @@ type RunGroup = {
   csv_date_end: string | null;
   findings: PendingFinding[];
 };
-
-const fmtCurrency = (n: number | null, code: string | null) => {
-  if (n == null) return '—';
-  // Rows written before the 2026-09 currency fix carry 'UNKNOWN' (migration
-  // 0009): the engine could not tell GTQ from USD, so claiming either would
-  // be a guess. Show the amount without asserting a currency.
-  if (!code || code === 'UNKNOWN') {
-    return `${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (sin moneda)`;
-  }
-  try {
-    return n.toLocaleString('en-US', { style: 'currency', currency: code });
-  } catch {
-    // An ISO code we don't recognise - a country mapped server-side but not
-    // known to Intl. Render the number and the raw code rather than crashing.
-    return `${code} ${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  }
-};
-
-// One-line stand-in for the exposure figure on zero-settlement findings,
-// pulled from the detector's own `metrics` block in the payload. Returns a
-// dash if the payload predates the metrics block or is shaped unexpectedly —
-// this is display-only, so it must never throw.
-function zeroSettlementSummary(payload: Record<string, unknown>): string {
-  const m = (payload as { metrics?: Record<string, unknown> })?.metrics;
-  if (!m) return 'Sin exposición (nada se liquidó)';
-  const attempts = Number(m.attempts ?? 0);
-  const cards = Number(m.distinct_cards ?? 0);
-  const ips = Number(m.distinct_ips ?? 0);
-  return `${attempts} intentos · ${cards} tarjetas · ${ips} IP`;
-}
-
-// How much of the merchant's book the exposure figure actually covers.
-//
-// The figure is now scoped to the suspicious transactions rather than every
-// settled charge at the merchant, and that distinction is invisible from an
-// amount alone: an analyst who reads "Exposición: GTQ 800" next to a merchant
-// that turned over 50,800 cannot tell whether 800 is the shortlist or a quiet
-// merchant. Saying "2 de 210 transacciones" is the difference between a lead
-// and an afternoon of reading.
-//
-// Returns '' when the payload predates these fields, so old findings render
-// exactly as they did. Display-only — must never throw.
-function exposureScope(payload: Record<string, unknown>): string {
-  const p = payload as {
-    suspicious_settled_count?: unknown;
-    suspicious_transaction_count?: unknown;
-    total_transactions?: unknown;
-  };
-  const settled = Number(p?.suspicious_settled_count ?? NaN);
-  const suspicious = Number(p?.suspicious_transaction_count ?? NaN);
-  const total = Number(p?.total_transactions ?? NaN);
-  if (!Number.isFinite(suspicious) || !Number.isFinite(total) || total <= 0) return '';
-
-  if (Number.isFinite(settled) && settled > 0) {
-    return `${settled} cargo${settled === 1 ? '' : 's'} sospechoso${settled === 1 ? '' : 's'} liquidado${settled === 1 ? '' : 's'}, de ${suspicious} transacciones marcadas (el merchant tiene ${total})`;
-  }
-  return `ningún cargo sospechoso se liquidó · ${suspicious} de ${total} transacciones marcadas`;
-}
 
 export default function PendientesPage() {
   const router = useRouter();
@@ -294,8 +258,17 @@ export default function PendientesPage() {
                 {g.findings.map(f => {
                   const isOpen = expanded.has(f.id);
                   const isBusy = busy.has(f.id);
-                  const evidence = ((f.payload as any)?.evidence || []) as Array<Record<string, unknown>>;
+                  const evidence = evidenceOf(f.payload);
                   const action = (f.payload as any)?.recommended_action_es as string | undefined;
+                  // Everything below comes from the shared modules, so this
+                  // queue says exactly what the desktop's does about the same
+                  // row — which was the whole problem: identical data, two
+                  // different stories depending on which app you opened.
+                  const patterns = rankPatterns(f.fingerprints || []);
+                  const reopened = reopenInfo(f);
+                  const country = countryCodeOf(f.analysis_runs?.currency_source);
+                  const stale = isStalePending(f.first_seen_at);
+                  const shortAction = actionFor(f.action_code);
                   return (
                     <div key={f.id} className="finding">
                       <div style={{
@@ -307,6 +280,26 @@ export default function PendientesPage() {
                       }}>
                         <div style={{ flex: '1 1 320px' }}>
                           <strong>{f.company_name}</strong>
+                          {country && (
+                            <span className="tag" style={{ marginLeft: '0.6rem' }}>{country}</span>
+                          )}
+                          {reopened && (
+                            <span
+                              className="tag"
+                              style={{
+                                marginLeft: '0.6rem',
+                                background: 'rgba(255, 107, 53, 0.15)',
+                                color: 'var(--cubo-orange)',
+                              }}
+                              title={
+                                reopened.reason
+                                  ? `Se descartó el ${fmtDay(reopened.rejectedAt)} y volvió: ${reopened.reason}`
+                                  : `Se descartó el ${fmtDay(reopened.rejectedAt)} y volvió`
+                              }
+                            >
+                              volvió
+                            </span>
+                          )}
                           {f.section === 'zero_settlement' && (
                             <span
                               className="tag"
@@ -322,6 +315,23 @@ export default function PendientesPage() {
                           <span className="muted" style={{ marginLeft: '0.75rem' }}>
                             Riesgo: {f.risk_score}
                           </span>
+                          {/* What this finding claims, in one line, before any
+                              of the numbers. verdictFor() maps the engine's
+                              finding_type; the seen line distinguishes a
+                              merchant that keeps reappearing from a new one. */}
+                          <div className="muted" style={{ fontSize: '0.85rem', marginTop: '0.15rem' }}>
+                            {verdictFor(f.finding_type)}
+                            {' · '}
+                            {seenLine(f.times_seen, f.first_seen_at)}
+                            {stale && (
+                              <span
+                                style={{ marginLeft: '0.5rem', color: 'var(--cubo-orange)' }}
+                                title="Lleva más de dos días en la cola sin revisar"
+                              >
+                                · esperando {fmtAge(f.first_seen_at)}
+                              </span>
+                            )}
+                          </div>
                           {/* Zero-settlement findings settle nothing, so an
                               exposure figure would always read "—". Show the
                               card-testing metrics that justify the flag instead. */}
@@ -340,11 +350,24 @@ export default function PendientesPage() {
                           <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>
                             {f.description_es}
                           </p>
+                          {/* Was a row of raw engine codes — `card_fanout_burst`,
+                              `single_ip_multi_card` — shown to Spanish-speaking
+                              analysts. rankPatterns puts the most telling
+                              signal first; describePattern supplies the words.
+                              Both come from shared/patterns.ts, the same
+                              dictionary the desktop reads. */}
                           <div>
-                            {(f.fingerprints || []).map(fp => (
-                              <span className="tag" key={fp}>{fp}</span>
+                            {patterns.map(fp => (
+                              <span className="tag" key={fp} title={describePattern(fp).explain}>
+                                {describePattern(fp).label}
+                              </span>
                             ))}
                           </div>
+                          {shortAction && (
+                            <div className="muted" style={{ fontSize: '0.85rem', marginTop: '0.35rem' }}>
+                              Acción sugerida: {shortAction}
+                            </div>
+                          )}
                         </div>
                         <div style={{ display: 'flex', gap: '0.4rem' }}>
                           <button

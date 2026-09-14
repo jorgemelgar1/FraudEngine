@@ -26,7 +26,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..'))
 
 _MIGRATION = os.path.join(_ROOT, 'supabase', 'migrations', '0010_finding_dedup.sql')
-_FINDINGS_TS = os.path.join(_ROOT, 'desktop', 'src', 'lib', 'findings.ts')
+# Moved to the repo root in 2026-09 so the web queue applies the same rule.
+# Living only under desktop/ is why the browser could not tell a re-opened
+# finding from a new one.
+_FINDINGS_TS = os.path.join(_ROOT, 'shared', 'review.ts')
 
 
 def _read(path):
@@ -37,7 +40,7 @@ def _read(path):
 def _js_regex_to_python(source, name):
     """Pull `const <name> = /…/;` out of the TypeScript and compile it."""
     m = re.search(rf'const {name}\s*=\s*/(.+?)/[gimsuy]*\s*;', source)
-    assert m, f'{name} is not declared in desktop/src/lib/findings.ts'
+    assert m, f'{name} is not declared in shared/review.ts'
     return re.compile(m.group(1))
 
 

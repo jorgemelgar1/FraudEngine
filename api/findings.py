@@ -133,12 +133,22 @@ def sb_rest(method: str, path: str, body=None, prefer: str = ''):
 # but the review UI needs description_es + recommended_action_es + the
 # fingerprints + the evidence card list, so we include it. If page loads
 # get slow at scale, paginate or trim payload here.
+# `times_seen` / `first_seen_at` (migration 0010) and the run's `source` and
+# `currency_source` were missing here while the desktop's own select had them.
+# The desktop file says "Mirrors api/findings.py:_LIST_SELECT ... keep this in
+# sync; otherwise the two clients silently disagree on what data is available",
+# and that is exactly what happened: the browser queue could not say "visto 3
+# veces desde el 8 sep", could not show which country a finding belonged to,
+# and could not distinguish a runner cycle from a manual upload — not because
+# anyone decided it should not, but because it never asked for the columns.
 _LIST_SELECT = (
     'id,run_id,company_name,company_id,finding_type,confidence,risk_score,'
     'fingerprints,action_code,section,chargeback_exposure_usd,'
     'chargeback_exposure_currency,description_es,review_status,reviewed_at,'
     'reviewed_by_email,review_notes,watchlist_delta,payload,'
-    'analysis_runs(run_at,run_by_email,csv_filename,csv_date_start,csv_date_end)'
+    'times_seen,first_seen_at,'
+    'analysis_runs(run_at,run_by_email,csv_filename,csv_date_start,'
+    'csv_date_end,source,currency_source)'
 )
 
 # Sections a caller may filter on. Anything else is rejected rather than
