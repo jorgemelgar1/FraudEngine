@@ -219,6 +219,7 @@ export default function IndicadoresPage() {
           <Link href="/" className="signout">Inicio</Link>
           <Link href="/pendientes" className="signout">Pendientes</Link>
           <Link href="/historial" className="signout">Historial</Link>
+          <Link href="/watchlist" className="signout">Watchlist</Link>
         </div>
       </header>
 

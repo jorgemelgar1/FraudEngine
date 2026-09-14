@@ -377,6 +377,7 @@ export default function HomePage() {
             Pendientes{pendingCount && pendingCount > 0 ? ` (${pendingCount})` : ''}
           </Link>
           <Link href="/historial" className="signout">Historial</Link>
+          <Link href="/watchlist" className="signout">Watchlist</Link>
           <Link href="/indicadores" className="signout">Indicadores</Link>
           <button
             className="signout"
