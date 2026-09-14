@@ -156,6 +156,89 @@ function Unprotect-BackupFile {
     } finally { $aes.Dispose() }
 }
 
+# ── Running other programs without PowerShell killing the script ────────────
+#
+# Windows PowerShell 5.1 wraps every line a native program writes to stderr in
+# an ErrorRecord. Under `$ErrorActionPreference = 'Stop'` that ErrorRecord is a
+# TERMINATING error, so a program that merely talks on stderr aborts the whole
+# script even when it succeeded and returned 0.
+#
+# This is not theoretical and `2>$null` does not fix it: it is the wrapping,
+# not the stream, that throws. Two real cases here:
+#
+#   git describe --tags --exact-match   says "fatal: no tag exactly matches"
+#                                       on any untagged commit, which is the
+#                                       normal state between releases
+#   python dump_supabase.py             prints its per-table progress to
+#                                       stderr on purpose, so stdout stays
+#                                       clean for data
+#
+# Both are ordinary output. Neither is a reason to stop. These two helpers are
+# the only sanctioned way to call a native program from these scripts.
+
+function Invoke-NativeCapture {
+    <#
+    .SYNOPSIS
+      Run a program, return its trimmed stdout, or $null if it failed.
+    .DESCRIPTION
+      For programs whose OUTPUT you want and whose complaints you do not.
+      Never throws: a non-zero exit, a missing executable and an empty result
+      are all reported as $null, so the caller decides what a failure means.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [string[]]$Arguments = @()
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $Command @Arguments 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        if ($null -eq $out) { return $null }
+        $text = ($out | Out-String).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        return $text
+    } catch {
+        return $null
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Invoke-NativeShow {
+    <#
+    .SYNOPSIS
+      Run a program, show everything it prints, return its exit code.
+    .DESCRIPTION
+      For long-running steps where the operator should watch progress. stdout
+      and stderr are merged and echoed in order; the exit code is what decides
+      success, which is the only thing that ever should have decided it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [string[]]$Arguments = @(),
+        [string]$Indent = '  '
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Command @Arguments 2>&1 | ForEach-Object {
+            $line = if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $_.Exception.Message
+            } else { "$_" }
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                Write-Host "$Indent$line"
+            }
+        }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if ($null -eq $code) { return 0 }
+    return $code
+}
+
+
 function Remove-FileSecurely {
     # The decrypted dump is the one moment card data touches this disk in the
     # clear. Delete alone only unlinks it - the bytes stay in the sectors until

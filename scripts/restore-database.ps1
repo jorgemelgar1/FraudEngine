@@ -102,8 +102,10 @@ try {
         $env:SUPABASE_URL         = $supaUrl
         $env:SUPABASE_SERVICE_KEY = $supaKey
         $env:RESTORE_IN           = $tmp
-        python (Join-Path $here 'restore_supabase.py')
-        if ($LASTEXITCODE -ne 0) { throw "The restore failed (exit $LASTEXITCODE)." }
+        # Same reason as the dump: progress goes to stderr, and calling python
+        # directly would abort on the first line. See _crypto.ps1.
+        $code = Invoke-NativeShow 'python' @((Join-Path $here 'restore_supabase.py')) -Indent '  '
+        if ($code -ne 0) { throw "The restore failed (exit $code)." }
     } finally {
         $env:SUPABASE_URL = $null; $env:SUPABASE_SERVICE_KEY = $null; $env:RESTORE_IN = $null
         $supaKey = $null

@@ -48,8 +48,15 @@ if ($resolvedRoot.TrimEnd('\').StartsWith($resolvedRepo.TrimEnd('\'), [StringCom
 if (-not $Label) {
     Push-Location $repo
     try {
-        $Label = (git describe --tags --exact-match 2>$null)
-        if (-not $Label) { $Label = 'sha-' + (git rev-parse --short HEAD 2>$null) }
+        # Being on an untagged commit is the normal state between releases, so
+        # `git describe --exact-match` saying so is expected, not a failure.
+        # See Invoke-NativeCapture in _crypto.ps1 for why calling git directly
+        # here used to abort the whole backup.
+        $Label = Invoke-NativeCapture 'git' @('describe', '--tags', '--exact-match')
+        if (-not $Label) {
+            $sha = Invoke-NativeCapture 'git' @('rev-parse', '--short', 'HEAD')
+            if ($sha) { $Label = "sha-$sha" }
+        }
         if (-not $Label) { $Label = 'unlabelled' }
     } finally { Pop-Location }
 }
@@ -109,8 +116,11 @@ try {
     $env:SUPABASE_URL         = $supaUrl
     $env:SUPABASE_SERVICE_KEY = $supaKey
     $env:DUMP_OUT             = $plain
-    python (Join-Path $here 'dump_supabase.py')
-    if ($LASTEXITCODE -ne 0) { throw "The dump failed (exit $LASTEXITCODE). Nothing was written." }
+    # dump_supabase.py reports per-table progress on stderr so stdout stays
+    # clean. Calling it directly would therefore abort the script on its first
+    # progress line — see Invoke-NativeShow in _crypto.ps1.
+    $code = Invoke-NativeShow 'python' @((Join-Path $here 'dump_supabase.py')) -Indent '  '
+    if ($code -ne 0) { throw "The dump failed (exit $code). Nothing was written." }
 } finally {
     $env:SUPABASE_URL = $null; $env:SUPABASE_SERVICE_KEY = $null; $env:DUMP_OUT = $null
     $supaKey = $null
