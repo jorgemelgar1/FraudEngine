@@ -141,10 +141,32 @@ def test_no_shadowed_top_level_definitions():
     assert not problems, 'shadowed definitions:\n  ' + '\n  '.join(problems)
 
 
-def test_foreign_card_helper_kept_its_behaviour():
-    """The rename must not have changed what the foreign-card path does."""
-    assert analyze._normalize_country_code('Guatemala') == 'GUATEMALA'
-    assert analyze._normalize_country_code('  guatemala ') == 'GUATEMALA'
+def test_foreign_card_helper_folds_names_and_codes_together():
+    """Merchant country and card country must compare equal when they are the
+    same country written two ways.
+
+    This helper reads from two columns with different conventions:
+    `country_name` spells the country out, `card_country_mind_fraud` uses an
+    ISO code. It used to only uppercase, so 'SV' != 'EL SALVADOR' and every
+    domestic Salvadoran card counted as foreign — the foreign-card velocity
+    rule fired hardest in the country it should have been quietest in.
+
+    It now folds both spellings onto the ISO alpha-2 code. The blank/None
+    handling below is unchanged and still guards the 2026-09 shadowing bug.
+    """
+    assert analyze._normalize_country_code('SV') == 'SV'
+    assert analyze._normalize_country_code('El Salvador') == 'SV'
+    assert analyze._normalize_country_code('  el salvador ') == 'SV'
+    assert analyze._normalize_country_code('SLV') == 'SV'
+
+    assert analyze._normalize_country_code('Guatemala') == 'GT'
+    assert analyze._normalize_country_code('  guatemala ') == 'GT'
+    assert analyze._normalize_country_code('GT') == 'GT'
+
+    # An unknown country is passed through uppercased rather than dropped:
+    # two unknowns that are spelled the same still compare equal.
+    assert analyze._normalize_country_code('Ruritania') == 'RURITANIA'
+
     assert analyze._normalize_country_code(None) is None
     assert analyze._normalize_country_code('') is None
     assert analyze._normalize_country_code('nan') is None

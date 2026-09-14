@@ -28,12 +28,25 @@ rates, and score components only — never cardholder names, payer emails, IPs,
 BINs, card last-four, or transaction ids. You can paste it into a ticket.
 
 **Counts are pre-dedup.** The harness calls the detector directly, so it
-reports what the detector found before `analyze()` applies section priority
-(Critical > Monitor > this section — a merchant already flagged by the
-exposure model is dropped from this section so nothing lists twice). The
-final report will therefore show the same merchants or fewer. On the
-synthetic fixture the harness finds 3 while the report lists 1, because
-Mandados sv and Inversiones Kabu also trip the exposure-model tiers.
+reports what the detector found before `analyze()` decides which listing a
+merchant appears under. The final report will therefore show the same
+merchants or fewer. On the synthetic fixture the harness finds 3 while the
+report lists 2.
+
+Deduplication goes by **severity**, then by section. A merchant the exposure
+model already rated Critical keeps that listing (it also carries the
+chargeback-exposure figure); a merchant the exposure model only rated Monitor
+loses to a Critical finding from this detector. Either way the loser's
+fingerprints are merged into the survivor, so no reason is lost with the row.
+
+Until 2026-09 the rule was section-first — this section always lost — and the
+two models use different Critical lines (70 there, `SECTION_CRITICAL_THRESHOLD`
+= 50 here. A Monitor exposure finding therefore suppressed a Critical
+card-testing one, which then never reached the review queue at all, because
+`build_findings_rows` queues Critical only. On this very fixture, Mandados sv
+was a Critical/100 card-testing finding reported to nobody. Worth remembering
+while reading old harness output against old reports: the discrepancy was not
+only deduplication, it was loss.
 
 ## What each section tells you
 
@@ -148,3 +161,23 @@ rescale does not drop them below the Critical line.
 - The `ZERO_SETTLEMENT_MAX_SUCCESS_RATE` sweep is inert on the fixture
   (merchants are either 0% or 100% settled). Real data has merchants in
   between; that is where this constant earns its keep.
+
+### Changed in the 2026-09 integrity fixes
+
+None of these were weight changes — the `W_*` constants are still frozen —
+but three of them move scores, so harness output from before that date is not
+comparable to output after it:
+
+- **Card fan-out is timed on `last_intent_at`**, not `transaction_created_at`.
+  Several attempts on one `transaction_id` share a single creation time, so
+  the windows used to collapse a slow grind into `card_fanout_burst`, the top
+  tier at 40 points. Expect fan-out tiers to come down on real data, and
+  `card_fanout_slow` — listed above as never firing — to start firing.
+- **A session with no declines caps at Monitor** and gains the
+  `unresolved_attempts_only` fingerprint. Six PENDING attempts used to score
+  Critical/100 with nothing declined and no aging rule.
+- **Velocity bands are per-currency** (`VELOCITY_BANDS`). The old bands were
+  USD-shaped and applied to GTQ amounts unconverted, so Guatemalan merchants
+  were held to roughly a fifth of the allowance a comparable USD merchant got.
+  The GTQ bands are round local numbers chosen by hand, not a converted rate —
+  they are a guess like everything else here, and the sweep should check them.

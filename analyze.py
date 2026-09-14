@@ -181,6 +181,19 @@ MONITOR_CODES = {
     '41 - LLAMAR AL EMISOR',
 }
 
+# How many rows a finding quotes as evidence.
+#
+# This is not cosmetic. Accepting a finding feeds `payload->'evidence'` to
+# accept_finding (migration 0004), which writes every card it contains to the
+# permanent watchlist. Evidence that is not the evidence therefore watchlists
+# the wrong cards — and watchlist_cards is never pruned, so a mistake here is
+# forever. Rows are chosen by what triggered the finding, never by position.
+EVIDENCE_MAX_ROWS = 5
+
+# Ceiling on how many matching transaction ids one indicator hit remembers.
+# Comfortably above EVIDENCE_MAX_ROWS so selection still has a choice.
+INDICATOR_MATCH_ID_CAP = 50
+
 # Contactless placeholders — name rotation between these is NOT a signal
 CONTACTLESS_PLACEHOLDERS = {
     'no-name', 'PAYWAVE/VISA', 'CARDHOLDER/VISA',
@@ -215,6 +228,24 @@ COUNTRY_TO_CURRENCY = {
     'panama':       'USD',
     'el salvador':  'USD',
     'guatemala':    'GTQ',
+}
+
+# Everything that means the same country, folded to one ISO-3166 alpha-2 key.
+# Used only for merchant-vs-card country COMPARISON (see
+# _normalize_country_code), never for the currency lookup above.
+#
+# The two sides of that comparison come from different columns with different
+# conventions — `country_name` spells the country out, `card_country_mind_fraud`
+# uses a code — so without this table a domestic card looks foreign.
+COUNTRY_ALIASES = {
+    'SLV': 'SV', 'EL SALVADOR': 'SV', 'ELSALVADOR': 'SV', 'SALVADOR': 'SV',
+    'GTM': 'GT', 'GUATEMALA': 'GT',
+    'PAN': 'PA', 'PANAMA': 'PA', 'PANAMÁ': 'PA',
+    'HND': 'HN', 'HONDURAS': 'HN',
+    'CRI': 'CR', 'COSTA RICA': 'CR', 'COSTARICA': 'CR',
+    'NIC': 'NI', 'NICARAGUA': 'NI',
+    'MEX': 'MX', 'MEXICO': 'MX', 'MÉXICO': 'MX',
+    'USA': 'US', 'UNITED STATES': 'US', 'ESTADOS UNIDOS': 'US',
 }
 
 
@@ -285,25 +316,47 @@ def is_real_name(name):
     return True
 
 
-def is_critical_code(reason):
+def _reason_prefix(reason):
+    """Uppercased code prefix of a rejection reason, e.g. '05' or 'SM'.
+
+    Matching on the prefix rather than the whole string, because the text
+    after the code is not stable in the export: the same code arrives with
+    different capitalisation, stray padding, misspellings ('14 - LLAMAR EL
+    EMISOR' vs '14 - LLAMAR AL EMISOR') and occasional channel suffixes.
+    Full-string equality treated every one of those as "not a fraud code",
+    which quietly withheld points from exactly the rows that deserved them.
+
+    The prefix is the part the processor actually keys on, so it is both the
+    stable half and the meaningful one. `_rejection_code` below does the same
+    job for the zero-settlement detector; this is the main model catching up.
+    """
     if pd.isna(reason):
-        return False
-    s = str(reason)
-    if s in CRITICAL_CODES:
-        return True
-    return False
+        return None
+    s = str(reason).strip().upper()
+    if not s:
+        return None
+    if ' - ' in s:
+        return s.split(' - ', 1)[0].strip()
+    return s
+
+
+# Derived from the full strings above so the two never drift apart.
+CRITICAL_CODE_PREFIXES = {c.split(' - ', 1)[0].strip().upper() for c in CRITICAL_CODES}
+MONITOR_CODE_PREFIXES = {c.split(' - ', 1)[0].strip().upper() for c in MONITOR_CODES}
+
+
+def is_critical_code(reason):
+    return _reason_prefix(reason) in CRITICAL_CODE_PREFIXES
 
 
 def is_minfraud_blocked(reason):
     if pd.isna(reason):
         return False
-    return MINFRAUD_SUBSTRING in str(reason)
+    return MINFRAUD_SUBSTRING.upper() in str(reason).upper()
 
 
 def is_monitor_code(reason):
-    if pd.isna(reason):
-        return False
-    return str(reason) in MONITOR_CODES
+    return _reason_prefix(reason) in MONITOR_CODE_PREFIXES
 
 
 def card_key(bin_num, last4):
@@ -316,16 +369,37 @@ def card_key(bin_num, last4):
         return None
 
 
-def velocity_ceiling(avg_ticket):
-    """Return the tx/minute ceiling above which velocity is flagged."""
-    if avg_ticket < 10:
-        return 8
-    elif avg_ticket < 50:
-        return 5
-    elif avg_ticket < 200:
-        return 2
-    else:
-        return 1  # anything more than 1/min on >$200 tickets is suspicious
+# Ticket-size bands for the velocity ceiling, per currency.
+#
+# The bands have to be expressed in the currency the amounts are actually in.
+# They were USD-shaped and applied to whatever number the CSV carried, so a
+# GTQ 231 ticket (about USD 30) was read as a big-ticket merchant and held to
+# 1 tx/min, while the identical USD 30 ticket was allowed 5. The same shop was
+# treated five times more suspiciously for being in Guatemala.
+#
+# The GTQ figures are deliberately round local numbers rather than a converted
+# rate: a live FX rate is not available here, and pretending to that precision
+# would be worse than choosing sensible local bands. Unlisted currencies fall
+# back to the USD bands.
+VELOCITY_BANDS = {
+    'USD': ((10, 8), (50, 5), (200, 2)),
+    'GTQ': ((75, 8), (400, 5), (1500, 2)),
+}
+VELOCITY_CEILING_FLOOR = 1   # above the top band
+
+
+def velocity_ceiling(avg_ticket, currency=None):
+    """Return the tx/minute ceiling above which velocity is flagged.
+
+    `currency` selects the ticket-size bands. Omitted, it uses the USD bands,
+    which is what every caller did before the bands became currency-aware.
+    """
+    bands = VELOCITY_BANDS.get((currency or DEFAULT_CURRENCY).upper(),
+                               VELOCITY_BANDS['USD'])
+    for upper, ceiling in bands:
+        if avg_ticket < upper:
+            return ceiling
+    return VELOCITY_CEILING_FLOOR
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +428,22 @@ def _compute_card_keys(df):
     ]
 
 
+# Columns that are identifiers, not quantities. Pandas infers a dtype per
+# column, so a phone column containing one blank cell becomes float64 and
+# 50212345678 arrives as 50212345678.0 — whose digits are '502123456780', a
+# trailing zero longer than the real number. norm_phone keeps the last 8, so
+# the stored indicator '12345678' and the CSV's '23456780' never matched and
+# phone indicators could not fire at all. The same class of error silently
+# eats leading zeros from ids.
+#
+# Reading them as text costs nothing: every consumer either compares them as
+# strings or runs them through pd.to_numeric itself.
+IDENTIFIER_COLUMNS = (
+    'transaction_id', 'company_id', 'client_phone',
+    'card_last_digits', 'bin_card_number',
+)
+
+
 def _read_csv_with_encoding_fallback(csv_path, **kwargs):
     # Excel-on-Windows saves CSV as cp1252 by default, not UTF-8. Retry on
     # UnicodeDecodeError so users don't have to re-export as "CSV UTF-8".
@@ -361,6 +451,32 @@ def _read_csv_with_encoding_fallback(csv_path, **kwargs):
         return pd.read_csv(csv_path, **kwargs)
     except UnicodeDecodeError:
         return pd.read_csv(csv_path, encoding='cp1252', **kwargs)
+
+
+def _force_identifier_dtypes(df):
+    """Re-read identifier columns as text, in place.
+
+    Done after the parse rather than via read_csv(dtype=...) so a CSV missing
+    one of these columns still reaches validate_schema and gets the friendly
+    "Missing required columns" error instead of a pandas KeyError.
+
+    Values that pandas already turned into floats are repaired here: 1234.0
+    becomes '1234', not '1234.0'. Nothing can recover a number that lost
+    precision, but these columns are short enough that none do.
+    """
+    for col in IDENTIFIER_COLUMNS:
+        if col not in df.columns:
+            continue
+        s = df[col]
+        if pd.api.types.is_float_dtype(s):
+            # Whole floats back to integer text; keep NaN as NaN.
+            df[col] = s.map(
+                lambda v: str(int(v)) if pd.notna(v) and float(v).is_integer()
+                else (None if pd.isna(v) else str(v))
+            )
+        elif not pd.api.types.is_object_dtype(s):
+            df[col] = s.map(lambda v: None if pd.isna(v) else str(v))
+    return df
 
 
 def load_and_dedupe(csv_path):
@@ -377,6 +493,8 @@ def load_and_dedupe(csv_path):
     ok, missing_req, _ = validate_schema(df)
     if not ok:
         raise ValueError(f"Missing required columns: {missing_req}")
+    # Before anything reads them: identifiers are text, not quantities.
+    df = _force_identifier_dtypes(df)
     df['last_intent_at'] = pd.to_datetime(df['last_intent_at'], errors='coerce')
     df['transaction_created_at'] = pd.to_datetime(df['transaction_created_at'], errors='coerce')
     df = df.sort_values(['transaction_id', 'last_intent_at'])
@@ -438,8 +556,13 @@ def identify_test_transactions(df_u):
 
 def detect_amount_ladder(group):
     """
-    Return True if any SINGLE card (same BIN + last4) at this merchant shows
-    3+ consecutive monotonic attempts (ascending or descending) within 20 min.
+    Return the transaction ids of the first amount ladder found at this
+    merchant, or an empty list. Truthy exactly when a ladder exists, so it
+    still reads as a boolean at the call site; the ids are what lets the
+    finding quote the rows that actually triggered it.
+
+    A ladder is any SINGLE card (same BIN + last4) showing 3+ consecutive
+    monotonic attempts (ascending or descending) within 20 min.
 
     Scoping by card is what makes the signal specific: unrelated customers
     producing a coincidentally-monotonic amount sequence at the same merchant
@@ -452,7 +575,7 @@ def detect_amount_ladder(group):
     # Only consider rows with an identifiable card_key
     g = group[group['card_key'].notna()] if 'card_key' in group.columns else group
     if len(g) < 3:
-        return False
+        return []
 
     for _, card_group in g.groupby('card_key'):
         if len(card_group) < 3:
@@ -460,6 +583,7 @@ def detect_amount_ladder(group):
         card_group = card_group.sort_values('transaction_created_at').reset_index(drop=True)
         amounts = card_group['amount'].tolist()
         times = card_group['transaction_created_at'].tolist()
+        tx_ids = card_group['transaction_id'].tolist()
         for i in range(len(amounts) - 2):
             window = amounts[i:i + 3]
             tw = times[i:i + 3]
@@ -470,8 +594,8 @@ def detect_amount_ladder(group):
             is_desc = all(window[j] >= window[j + 1] for j in range(2))
             is_asc = all(window[j] <= window[j + 1] for j in range(2))
             if (is_desc or is_asc) and len(set(window)) > 1:
-                return True
-    return False
+                return list(tx_ids[i:i + 3])
+    return []
 
 
 def detect_real_name_rotation(df_u):
@@ -573,8 +697,18 @@ def detect_cross_merchant_reuse(df_u):
 
 def detect_channel_switch(df_u):
     """
-    Return list of hits: same card rejected via POS with fraud code, then retried
-    via another channel (LINK/QR) for similar amount within 5 min and succeeded.
+    Return list of hits: same card rejected with a fraud code, then retried via
+    another channel for a similar amount within 5 min and succeeded.
+
+    Each hit carries `cross_merchant`. The scan groups by card, so the retry
+    can land at a DIFFERENT merchant than the rejection — and this used to be
+    reported as though one merchant had switched its own channel, attributed
+    to the merchant that did the rejecting. A merchant that correctly declined
+    a card was scored for the fraud, while the merchant that actually took the
+    money was not mentioned. Same-merchant and cross-merchant switches are now
+    labelled, and only same-merchant ones feed the merchant score; the
+    cross-merchant pattern is real but means something different and is
+    reported on its own until it has been calibrated.
     """
     df = df_u[df_u['card_key'].notna()]
 
@@ -606,24 +740,34 @@ def detect_channel_switch(df_u):
             ]
             if len(followup) > 0:
                 hit_row = followup.iloc[0]
+                cross = hit_row['company_name'] != row['company_name']
                 hits.append({
                     'card_key': ck,
                     'rejected_tx_id': row['transaction_id'],
                     'rejected_channel': row['transaction_type'],
                     'rejected_reason': row['rejection_reason'],
+                    'rejected_company_name': row['company_name'],
                     'succeeded_tx_id': hit_row['transaction_id'],
                     'succeeded_channel': hit_row['transaction_type'],
+                    'succeeded_company_name': hit_row['company_name'],
                     'amount': float(row['amount']),
+                    # Kept for compatibility with existing consumers. For a
+                    # same-merchant switch both merchants are this one; for a
+                    # cross-merchant one, the money landed at
+                    # succeeded_company_name, which is the one worth looking at.
                     'company_name': row['company_name'],
                     'company_id': row['company_id'],
+                    'cross_merchant': bool(cross),
                     'delta_seconds': (hit_row['transaction_created_at'] - t0).total_seconds(),
                 })
     return hits
 
 
-def detect_velocity_burst(df_u):
+def detect_velocity_burst(df_u, currency=None):
     """
     Return dict {company_name: burst_info} for merchants exceeding their tier ceiling.
+
+    `currency` picks the ticket-size bands — see velocity_ceiling.
 
     O(N) per merchant via two-pointer scan over a 1-minute sliding window.
     """
@@ -633,12 +777,13 @@ def detect_velocity_burst(df_u):
         if len(group) < 3:
             continue
         avg_ticket = group['amount'].mean()
-        ceiling = velocity_ceiling(avg_ticket)
+        ceiling = velocity_ceiling(avg_ticket, currency)
 
         g_valid = group[group['transaction_created_at'].notna()]
         times = g_valid['transaction_created_at'].values
         n = len(times)
         max_in_window = 0
+        best_start = best_end = 0
         j = 0
         for i in range(n):
             limit = times[i] + window_delta
@@ -649,6 +794,9 @@ def detect_velocity_burst(df_u):
             count = j - i
             if count > max_in_window:
                 max_in_window = count
+                # Remember which rows made the densest minute, so the finding
+                # can quote them instead of whatever happened to come first.
+                best_start, best_end = i, j
 
         if max_in_window > ceiling:
             # Round-number repetition: 3 consecutive identical whole-dollar
@@ -668,6 +816,10 @@ def detect_velocity_burst(df_u):
                 'ceiling': ceiling,
                 'avg_ticket': round(float(avg_ticket), 2),
                 'round_number_repetition': round_rep,
+                'transaction_ids': [
+                    str(t) for t in
+                    g_valid['transaction_id'].values[best_start:best_end]
+                ],
             }
     return hits
 
@@ -676,7 +828,9 @@ def _bin_diversity_scan(times, bins_arr, is_rej, delta, min_bins):
     """
     Two-pointer sweep: find any sliding window of size <= delta with at least
     min_bins unique BINs and rejection rate >= REJECT_RATE_THRESHOLD.
-    Returns (unique_bins, reject_rate) for the triggering window, else (0, 0).
+    Returns (unique_bins, reject_rate, start, end) for the triggering window,
+    else (0, 0, 0, 0). start/end are half-open positions into `times`, so the
+    caller can name the rows that actually tripped the rule.
     """
     n = len(times)
     counter = {}
@@ -695,7 +849,7 @@ def _bin_diversity_scan(times, bins_arr, is_rej, delta, min_bins):
         rate = rej_count / total if total > 0 else 0.0
         unique = len(counter)
         if unique >= min_bins and rate >= REJECT_RATE_THRESHOLD:
-            return unique, rate
+            return unique, rate, i, j
         # Shrink before next i
         b_out = bins_arr[i]
         counter[b_out] -= 1
@@ -704,7 +858,7 @@ def _bin_diversity_scan(times, bins_arr, is_rej, delta, min_bins):
         if is_rej[i]:
             rej_count -= 1
         total -= 1
-    return 0, 0.0
+    return 0, 0.0, 0, 0
 
 
 def detect_bin_diversity_burst(df_u):
@@ -734,14 +888,18 @@ def detect_bin_diversity_burst(df_u):
         bins_arr = g_valid['bin_card_number'].values
         is_rej = (g_valid['status'] == 'REJECTED').values
 
-        bins_1h, rate_1h = _bin_diversity_scan(times, bins_arr, is_rej, delta_1h, 6)
-        bins_4h, rate_4h = _bin_diversity_scan(times, bins_arr, is_rej, delta_4h, 10)
+        bins_1h, rate_1h, s1, e1 = _bin_diversity_scan(times, bins_arr, is_rej, delta_1h, 6)
+        bins_4h, rate_4h, s4, e4 = _bin_diversity_scan(times, bins_arr, is_rej, delta_4h, 10)
 
         if bins_1h > 0 or bins_4h > 0:
+            start, end = (s1, e1) if bins_1h > 0 else (s4, e4)
             hits[mname] = {
                 'bins_in_window': int(max(bins_1h, bins_4h)),
                 'reject_rate_in_window': round(float(max(rate_1h, rate_4h)), 2),
                 'window_hours': 1 if bins_1h > 0 else 4,
+                'transaction_ids': [
+                    str(t) for t in g_valid['transaction_id'].values[start:end]
+                ],
             }
     return hits
 
@@ -765,7 +923,13 @@ def _normalize_country_code(val):
     s = str(val).strip().upper()
     if s == '' or s == 'NAN':
         return None
-    return s
+    # The merchant side of this comparison carries country NAMES (from
+    # country_name) while the card side carries ISO CODES (from
+    # card_country_mind_fraud). Uppercasing alone left 'SV' and 'EL SALVADOR'
+    # as different countries, so every Salvadoran card at a Salvadoran
+    # merchant counted as foreign — the foreign-card velocity rule fired on
+    # ordinary domestic traffic in exactly the country where it should not.
+    return COUNTRY_ALIASES.get(s, s)
 
 
 def detect_foreign_card_velocity(df_u):
@@ -841,6 +1005,10 @@ def detect_foreign_card_velocity(df_u):
                 'merchant_country': merchant_country,
                 'foreign_card_countries': sorted(best_countries),
                 'total_foreign_transactions': int(len(foreign)),
+                'transaction_ids': [
+                    str(t) for t in
+                    foreign['transaction_id'].values[best_start:best_end]
+                ],
             }
     return hits
 
@@ -986,6 +1154,21 @@ def _build_attempts(df_raw):
     # Keep the terminal (highest-rank) row per attempt.
     df = df.sort_values('_rank', kind='stable')
     attempts = df.groupby('_attempt_id', sort=False).tail(1).copy()
+
+    # When each attempt happened, as opposed to when the payment was created.
+    #
+    # These are different clocks and the difference matters: several attempts
+    # on one transaction_id all share a single transaction_created_at. Timing
+    # the card fan-out on that column made six attempts spread over ten hours
+    # look like six cards inside five minutes, which is the top burst tier and
+    # scores 40 points. last_intent_at moves per attempt, which is also why
+    # _attempt_id is keyed on it two lines above.
+    #
+    # Falls back to transaction_created_at where last_intent_at is missing, so
+    # a partially-populated export degrades to the old behaviour rather than
+    # dropping the row from the window scan entirely.
+    attempts['_attempt_time'] = attempts['last_intent_at'].fillna(
+        attempts['transaction_created_at'])
     return attempts
 
 
@@ -1082,7 +1265,9 @@ def build_rejected_description_es(mname, fps, metrics, currency):
             f"(código dominante '{metrics['top_code']}' ×{metrics['top_code_count']})."
         )
     if 'card_diversity' in fps:
-        pieces.append(f"Alta diversidad de tarjetas/BINs en sesión sin liquidación ({metrics['distinct_bins']} BINs).")
+        _settle = ("sin liquidación" if metrics['succeeded'] == 0
+                   else "con liquidación casi nula")
+        pieces.append(f"Alta diversidad de tarjetas/BINs en sesión {_settle} ({metrics['distinct_bins']} BINs).")
     if 'watchlist_merchant' in fps:
         pieces.append("REPEAT OFFENDER: merchant ya en watchlist.")
     if 'watchlist_card' in fps:
@@ -1119,12 +1304,15 @@ def detect_suspicious_rejected_merchants(
 
         # Cardholder-side subset (exclude POS terminals) with valid card+time.
         ch = m[~m['transaction_type'].isin(POS_CHANNELS)]
-        chc = ch[ch['_card_key'].notna() & ch['transaction_created_at'].notna()] \
-            .sort_values('transaction_created_at')
+        # Timed on _attempt_time (last_intent_at), not on when the payment was
+        # created — see _build_attempts. Several attempts can share one
+        # transaction_created_at, which collapsed a slow grind into a burst.
+        chc = ch[ch['_card_key'].notna() & ch['_attempt_time'].notna()] \
+            .sort_values('_attempt_time')
 
         max_5 = max_60 = max_24 = max_30 = 0
         if len(chc):
-            times = chc['transaction_created_at'].values
+            times = chc['_attempt_time'].values
             keys = chc['_card_key'].values
             max_5 = _max_distinct_in_window(times, keys, FANOUT_BURST_WINDOW)
             max_60 = _max_distinct_in_window(times, keys, FANOUT_SESSION_WINDOW)
@@ -1211,7 +1399,21 @@ def detect_suspicious_rejected_merchants(
             fps.append('watchlist_card')
 
         score = min(score, 100)
-        if score >= SECTION_CRITICAL_THRESHOLD:
+
+        # A session where nothing was actually declined has not demonstrated
+        # anything yet. Six PENDING attempts across six cards used to score
+        # Critical/100 on their own, with no rejection and no aging rule — but
+        # PENDING means the payment has not resolved, and a shopper who opens
+        # six checkouts looks identical to a bot that abandoned six. The
+        # pattern is still worth showing, so it is capped at Monitor rather
+        # than dropped, and says why. Abandoned checkouts have their own
+        # detector (detect_abandoned_suspicious) built for exactly this shape.
+        n_rejected = int((m['status'] == 'REJECTED').sum())
+        unresolved_only = n_rejected == 0
+        if unresolved_only:
+            fps.append('unresolved_attempts_only')
+
+        if score >= SECTION_CRITICAL_THRESHOLD and not unresolved_only:
             confidence = 'Critical'
         elif score >= SECTION_MONITOR_THRESHOLD:
             confidence = 'Monitor'
@@ -1265,11 +1467,22 @@ def detect_suspicious_rejected_merchants(
             'confidence': confidence,
             'fingerprints': fps,
             'description_es': build_rejected_description_es(mname, fps, metrics, currency),
+            # The gate allows up to ZERO_SETTLEMENT_MAX_SUCCESS_RATE, so a
+            # session can reach this point with a few settled payments. Saying
+            # "nada se liquidó" to an analyst looking at a run that did settle
+            # something costs the report its credibility, and the exposure
+            # claim is wrong besides: those charges can be charged back.
             'recommended_action_es': (
                 "Revisar y considerar congelar el merchant: sesión sin liquidación "
                 "con comportamiento de card testing. No hay exposición a chargebacks "
                 "(nada se liquidó), pero indica abuso de la cuenta para probar "
                 "tarjetas robadas."
+                if n_succ == 0 else
+                f"Revisar y considerar congelar el merchant: sesión con liquidación "
+                f"casi nula ({n_succ} de {n_attempts} intentos) y comportamiento de "
+                f"card testing. La exposición a chargebacks se limita a esas "
+                f"{n_succ} transacciones liquidadas; el patrón indica abuso de la "
+                f"cuenta para probar tarjetas robadas."
             ),
             'action_code': 'REVIEW_MERCHANT',
             'metrics': metrics,
@@ -1703,6 +1916,11 @@ class FraudIndicatorSet:
 
         hits = defaultdict(dict)   # company -> {(indicator_id, kind): hit}
         companies = df['company_name'].astype(str)
+        # Carried so a hit can name the rows it matched. One hit still covers
+        # forty rows, but the finding it feeds has to quote the right ones —
+        # evidence is what the review RPC turns into watchlist entries.
+        tx_ids = (df['transaction_id'].astype(str)
+                  if 'transaction_id' in df.columns else None)
 
         for itype, columns in INDICATOR_SOURCE_COLUMNS.items():
             exact_map = self.by_type.get(itype) or {}
@@ -1721,24 +1939,31 @@ class FraudIndicatorSet:
                 if exact_map:
                     mask = norm_col.isin(exact_map.keys()) & norm_col.notna()
                     if mask.any():
-                        self._collect_exact(hits, companies, norm_col, mask, exact_map, col)
+                        self._collect_exact(hits, companies, norm_col, mask,
+                                            exact_map, col, tx_ids)
 
                 if fuzzy_list:
-                    self._collect_fuzzy(hits, companies, norm_col, fuzzy_list, itype, col)
+                    self._collect_fuzzy(hits, companies, norm_col, fuzzy_list,
+                                        itype, col, tx_ids)
 
         return {company: list(by_key.values()) for company, by_key in hits.items()}
 
-    def _collect_exact(self, hits, companies, norm_col, mask, exact_map, column):
+    def _collect_exact(self, hits, companies, norm_col, mask, exact_map, column,
+                       tx_ids=None):
         for idx in norm_col.index[mask]:
             value = norm_col.loc[idx]
             company = companies.loc[idx]
             for rec in exact_map.get(value, []):
                 key = (rec['id'], 'exact')
                 if key in hits[company]:
+                    _remember_matched_row(hits[company][key], tx_ids, idx)
                     continue
-                hits[company][key] = self._make_hit(rec, 'exact', value, company, column)
+                hit = self._make_hit(rec, 'exact', value, company, column)
+                _remember_matched_row(hit, tx_ids, idx)
+                hits[company][key] = hit
 
-    def _collect_fuzzy(self, hits, companies, norm_col, fuzzy_list, itype, column):
+    def _collect_fuzzy(self, hits, companies, norm_col, fuzzy_list, itype, column,
+                       tx_ids=None):
         # Compare against the distinct values in this column, not every row —
         # a merchant with 5,000 transactions usually has far fewer identities.
         distinct = [v for v in norm_col.dropna().unique()]
@@ -1759,8 +1984,11 @@ class FraudIndicatorSet:
                     company = companies.loc[idx]
                     key = (rec['id'], 'fuzzy')
                     if key in hits[company]:
+                        _remember_matched_row(hits[company][key], tx_ids, idx)
                         continue
-                    hits[company][key] = self._make_hit(rec, 'fuzzy', value, company, column)
+                    hit = self._make_hit(rec, 'fuzzy', value, company, column)
+                    _remember_matched_row(hit, tx_ids, idx)
+                    hits[company][key] = hit
 
     @staticmethod
     def _make_hit(rec, kind, matched_value, company, column):
@@ -1778,7 +2006,27 @@ class FraudIndicatorSet:
             'cross_merchant': bool(origin) and origin != company,
             'added_by_email': rec.get('added_by_email'),
             'added_at': rec.get('added_at'),
+            # Filled in by _remember_matched_row as rows are walked.
+            'matched_transaction_ids': [],
         }
+
+
+def _remember_matched_row(hit, tx_ids, idx):
+    """Record which transaction a hit matched, capped so a merchant with
+    thousands of rows on one indicator does not carry thousands of ids into
+    the payload. The cap is well above EVIDENCE_MAX_ROWS, so evidence
+    selection still has more than it can use."""
+    if tx_ids is None:
+        return
+    ids = hit.setdefault('matched_transaction_ids', [])
+    if len(ids) >= INDICATOR_MATCH_ID_CAP:
+        return
+    try:
+        tx = tx_ids.loc[idx]
+    except KeyError:
+        return
+    if tx not in ids:
+        ids.append(tx)
 
 
 def _fuzzy_indicator_match(itype, target, value):
@@ -2033,6 +2281,104 @@ def update_watchlist(wl, critical_findings, date_str):
 # Main analysis pipeline
 # ---------------------------------------------------------------------------
 
+def _select_evidence_rows(group, trigger_ids, limit=EVIDENCE_MAX_ROWS):
+    """Return the rows a finding should quote, most-implicated first.
+
+    `group` is one merchant's slice of df_u, already time-sorted.
+    `trigger_ids` is the set of transaction ids the detectors that fired
+    actually named.
+
+    Preference order:
+      1. Rows a detector named. These are the finding.
+      2. Failing that (a detector fired but named nothing), rejected rows
+         carrying a fraud-specific or MinFraud code, then any rejected row.
+      3. Failing that, the merchant's first rows — the old behaviour, now
+         reached only when nothing better exists.
+
+    Deliberately NOT padded up to `limit` with unrelated rows. Under-filling
+    is correct: a finding with two triggering rows should quote two, because
+    every extra row becomes a permanent watchlist entry on acceptance.
+    """
+    if trigger_ids:
+        picked = group[group['transaction_id'].astype(str).isin(trigger_ids)]
+        if len(picked) > 0:
+            return picked.head(limit)
+
+    if '_is_critical_code' in group.columns and '_is_minfraud_blocked' in group.columns:
+        flagged = group[group['_is_critical_code'] | group['_is_minfraud_blocked']]
+        if len(flagged) > 0:
+            return flagged.head(limit)
+
+    rejected = group[group['status'] == 'REJECTED']
+    if len(rejected) > 0:
+        return rejected.head(limit)
+
+    return group.head(limit)
+
+
+def _absorb_fingerprints(winner, loser):
+    """Move the loser's fingerprints onto the finding that outranked it.
+
+    A merchant can fire in both models for genuinely different reasons. When
+    one listing is dropped so the merchant is not shown twice, its reasons
+    would otherwise vanish with it — and those reasons are what an analyst
+    reads to decide. Order is preserved and duplicates are skipped.
+    """
+    fps = winner.setdefault('fingerprints', [])
+    seen = set(fps)
+    for fp in loser.get('fingerprints', []):
+        if fp not in seen:
+            fps.append(fp)
+            seen.add(fp)
+
+
+def _resolve_duplicate_merchants(critical_findings, monitor_findings, suspicious_rejected):
+    """Keep one listing per merchant, choosing by severity then by section.
+
+    Returns (suspicious_rejected, monitor_findings), both filtered. The
+    Critical tier is never filtered: it already holds the highest severity
+    the engine can assign, and it carries the chargeback-exposure figure.
+    """
+    critical_by_merchant = {}
+    for f in critical_findings:
+        critical_by_merchant.setdefault(f['company_name'], f)
+    monitor_by_merchant = {}
+    for f in monitor_findings:
+        monitor_by_merchant.setdefault(f['company_name'], f)
+
+    kept_suspicious = []
+    dropped_monitor = set()
+
+    for f in suspicious_rejected:
+        mname = f['company_name']
+        crit = critical_by_merchant.get(mname)
+        if crit is not None:
+            # Already Critical in the exposure model, which additionally
+            # carries the exposure amount. That listing wins on the tie.
+            _absorb_fingerprints(crit, f)
+            continue
+
+        mon = monitor_by_merchant.get(mname)
+        if mon is not None:
+            if f['confidence'] == 'Critical':
+                # The card-testing finding is genuinely the more severe of
+                # the two. Keep it and drop the Monitor row instead — the
+                # reverse of what this code used to do.
+                _absorb_fingerprints(f, mon)
+                dropped_monitor.add(mname)
+                kept_suspicious.append(f)
+            else:
+                _absorb_fingerprints(mon, f)
+            continue
+
+        kept_suspicious.append(f)
+
+    monitor_findings = [
+        f for f in monitor_findings if f['company_name'] not in dropped_monitor
+    ]
+    return kept_suspicious, monitor_findings
+
+
 def analyze(csv_path, watchlist_path=None, indicators_path=None):
     # Schema is validated inside load_and_dedupe before any columns get touched.
     df_raw, df_u = load_and_dedupe(csv_path)
@@ -2046,9 +2392,15 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
     # are vectorized in C. The merchant loop later just slices these boolean
     # columns by group index — turning O(merchants × rows-per-merchant) Python
     # callable invocations into one C-level pass per CSV.
-    _reason_str = df_u['rejection_reason'].fillna('').astype(str)
-    df_u['_is_critical_code']    = _reason_str.isin(CRITICAL_CODES)
-    df_u['_is_minfraud_blocked'] = _reason_str.str.contains(MINFRAUD_SUBSTRING, regex=False, na=False)
+    # Prefix-based, matching is_critical_code / is_monitor_code exactly. These
+    # used to test full-string membership while the row-level helpers now test
+    # the code prefix; any divergence would mean the merchant loop and the
+    # helpers disagreed about what counts as a fraud decline.
+    _reason_str = df_u['rejection_reason'].fillna('').astype(str).str.strip().str.upper()
+    _reason_pref = _reason_str.str.split(' - ', n=1).str[0].str.strip()
+    df_u['_is_critical_code']    = _reason_pref.isin(CRITICAL_CODE_PREFIXES) & _reason_str.ne('')
+    df_u['_is_minfraud_blocked'] = _reason_str.str.contains(
+        MINFRAUD_SUBSTRING.upper(), regex=False, na=False)
 
     # Watchlist — both merchants and cards persist permanently once flagged.
     watchlist = load_watchlist(watchlist_path) if watchlist_path else {'merchants': {}, 'cards': {}}
@@ -2079,7 +2431,7 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
     name_rotations = detect_real_name_rotation(df_u)
     cross_merchant = detect_cross_merchant_reuse(df_u)
     channel_switches = detect_channel_switch(df_u)
-    velocity_bursts = detect_velocity_burst(df_u)
+    velocity_bursts = detect_velocity_burst(df_u, currency)
     bin_diversity_bursts = detect_bin_diversity_burst(df_u)
     foreign_card_bursts = detect_foreign_card_velocity(df_u)
     abandoned = detect_abandoned_suspicious(df_u)
@@ -2106,21 +2458,31 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
         for m in hit['merchants']:
             cross_by_merchant[m].append(hit)
 
+    # Only same-merchant switches score. A cross-merchant retry is a real
+    # pattern but a different claim — it says a card is shopping for a
+    # merchant that will accept it, not that this merchant switched channel —
+    # and scoring the rejecting merchant for it punished the merchant whose
+    # decline worked. Reported separately (trends.cross_merchant_channel_switch)
+    # so analysts still see it, scored once it has been calibrated. Same
+    # treatment fuzzy indicator matches already get.
+    same_merchant_switches = [h for h in channel_switches if not h['cross_merchant']]
+    cross_merchant_switches = [h for h in channel_switches if h['cross_merchant']]
+
     switch_by_merchant = defaultdict(list)
-    for hit in channel_switches:
+    for hit in same_merchant_switches:
         switch_by_merchant[hit['company_name']].append(hit)
 
     # Name rotations: attach to merchants where the card appeared
     rotation_by_merchant = defaultdict(list)
     for ck, identities in name_rotations.items():
-        bin_, last4 = ck.split('-')
-        try:
-            rows = df_u[(df_u['bin_card_number'] == float(bin_)) &
-                        (df_u['card_last_digits'] == float(last4))]
-            for m in rows['company_name'].unique():
-                rotation_by_merchant[m].append({'card_key': ck, **identities})
-        except (ValueError, TypeError):
-            pass
+        # Match on card_key, which is already computed and canonical. This
+        # used to split the key and compare `bin_card_number == float(bin_)`,
+        # which depended on pandas having parsed those columns as numbers —
+        # a blank anywhere in the column makes them float, a non-numeric value
+        # makes them strings, and the comparison then silently matched nothing.
+        rows = df_u[df_u['card_key'] == ck]
+        for m in rows['company_name'].unique():
+            rotation_by_merchant[m].append({'card_key': ck, **identities})
 
     # Per-merchant fingerprints + scoring
     critical_findings = []
@@ -2197,6 +2559,37 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
         if risk_score < 20:
             continue
 
+        # ── Which rows actually triggered this finding ───────────────────
+        # Collected from the detectors that fired rather than taken by
+        # position. Accepting a finding writes its evidence cards to the
+        # permanent watchlist, so quoting the wrong rows both watchlists
+        # innocent cards and lets the attacker's cards go unrecorded.
+        trigger_ids = set()
+        trigger_ids.update(str(t) for t in critical_code_rows['transaction_id'])
+        trigger_ids.update(str(t) for t in minfraud_rows['transaction_id'])
+        trigger_ids.update(str(t) for t in ladder_hit)
+        for hit in (velocity_hit, bin_diversity_hit, foreign_card_hit):
+            if hit:
+                trigger_ids.update(str(t) for t in hit.get('transaction_ids', []))
+        for hit in switches_here:
+            trigger_ids.add(str(hit['rejected_tx_id']))
+            trigger_ids.add(str(hit['succeeded_tx_id']))
+        for hit in cross_here:
+            trigger_ids.update(str(t) for t in hit.get('transaction_ids', []))
+        for hit in merchant_indicator_hits:
+            trigger_ids.update(str(t) for t in hit.get('matched_transaction_ids', []))
+        if test_mask.any():
+            trigger_ids.update(str(t) for t in df_u.loc[test_mask, 'transaction_id'])
+        # Rotations and watchlist hits name a card, not a transaction; the
+        # implicated rows are that card's rows at this merchant.
+        rotation_card_keys = {r['card_key'] for r in rotations_here}
+        flagged_card_keys = rotation_card_keys | (merchant_card_keys & watchlist_cards)
+        if flagged_card_keys:
+            trigger_ids.update(
+                str(t) for t in
+                group.loc[group['card_key'].isin(flagged_card_keys), 'transaction_id']
+            )
+
         # Build finding object
         ticket_rows = group[succeeded_mask]
         # Chargeback-exposure rule (post-2026-05): every succeeded charge at a
@@ -2212,15 +2605,16 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
         # available for any future reuse.
         exposure = float(ticket_rows['amount'].sum()) if len(ticket_rows) > 0 else 0.0
 
-        # Evidence: first 5 rows. df_u is already globally time-sorted, so no
-        # need to re-sort the per-merchant slice.
+        # Evidence: the rows the detectors named, not the first rows in the
+        # file. df_u is already globally time-sorted, so the selected slice
+        # stays in chronological order without re-sorting.
         #
         # The payer fields (client_name / client_email / ip) are recorded here
         # to match what the zero-settlement detector already stores. Until
         # this was levelled up, the two sections wrote different evidence
         # shapes, which meant a confirmed-fraud indicator could be checked
         # against the history of one section but not the other.
-        evidence_rows = group.head(5)
+        evidence_rows = _select_evidence_rows(group, trigger_ids)
         evidence = []
         for _, r in evidence_rows.iterrows():
             evidence.append({
@@ -2349,17 +2743,30 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
         reverse=True,
     )
 
-    # Section priority: Critical > Monitor > suspicious-rejected. A merchant
-    # that already surfaced in the existing Critical/Monitor tiers is shown
-    # there (the more important section) and dropped from the new section, so
-    # nothing is listed twice. The existing tiers are left untouched.
-    already_flagged = (
-        {f['company_name'] for f in critical_findings}
-        | {f['company_name'] for f in monitor_findings}
+    # One merchant, one listing — but decided by SEVERITY, not by section.
+    #
+    # The two models have different Critical lines: 70 for the exposure model
+    # above, SECTION_CRITICAL_THRESHOLD (50) for the card-testing detector.
+    # This used to drop the card-testing finding whenever the merchant
+    # appeared in either existing tier, on the assumption that those tiers
+    # were always "more important". They are not. A Monitor exposure finding
+    # would silently suppress a Critical card-testing finding, and because
+    # only Critical findings are queued for review (build_findings_rows in
+    # api/analyze.py marks everything else not_applicable), the card-testing
+    # finding then reached nobody.
+    #
+    # The failure inverted the signal it was meant to serve: fraud-specific
+    # decline codes push the exposure score up into the Monitor band, so the
+    # more clearly fraudulent a session looked, the more likely its Critical
+    # finding was to disappear. Identical six-attempt attacks differing only
+    # in decline reason landed as Critical/pending or Monitor/not_applicable.
+    #
+    # Severity now wins; section only breaks ties. Whichever finding loses
+    # donates its fingerprints to the winner, so the reason it fired survives
+    # even though its row does not.
+    suspicious_rejected, monitor_findings = _resolve_duplicate_merchants(
+        critical_findings, monitor_findings, suspicious_rejected,
     )
-    suspicious_rejected = [
-        f for f in suspicious_rejected if f['company_name'] not in already_flagged
-    ]
 
     # Watchlist hits
     watchlist_hits_merchants = [m for m in df_u['company_name'].unique() if m in watchlist_merchants]
@@ -2413,6 +2820,10 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
             'repeat_offenders_from_watchlist': watchlist_hits_merchants,
             'new_watchlist_entries': [f['company_name'] for f in critical_findings if f['company_name'] not in watchlist_merchants],
             'velocity_outliers': [{'company_name': k, **v} for k, v in velocity_bursts.items()],
+            # A card declined for fraud at one merchant and accepted moments
+            # later at another. Reported, not scored — see the note where
+            # switch_by_merchant is built.
+            'cross_merchant_channel_switch': cross_merchant_switches,
             'foreign_card_velocity': [{'company_name': k, **v} for k, v in foreign_card_bursts.items()],
             'ring_signatures': rings,
         },

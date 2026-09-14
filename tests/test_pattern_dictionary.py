@@ -36,10 +36,22 @@ def _read(path):
 
 
 def _engine_fingerprints():
-    """Every code analyze.py can append to a finding's `fingerprints`."""
+    """Every code analyze.py can append to a finding's `fingerprints`.
+
+    Matches both list names. The zero-settlement detector builds its list as
+    `fps` rather than `fingerprints`, and this pattern used to look only for
+    the latter — so the whole card-testing family (card_fanout_burst,
+    single_ip_multi_card, zero_settlement_session and six more) was exempt
+    from the very check this file exists to perform, and reached analysts as
+    raw English identifiers. A contract test that silently covers half the
+    contract is worse than no test, because it is believed.
+    """
     src = _read(_ENGINE)
-    codes = set(re.findall(r"fingerprints\.append\('([a-z0-9_]+)'\)", src))
+    codes = set(re.findall(r"\b(?:fingerprints|fps)\.append\('([a-z0-9_]+)'\)", src))
     assert codes, 'no fingerprints found — did the append pattern change?'
+    # The literal that seeds the zero-settlement list, which is assigned
+    # rather than appended: `fps = ['zero_settlement_session']`.
+    codes |= set(re.findall(r"\bfps = \['([a-z0-9_]+)'\]", src))
     return codes
 
 

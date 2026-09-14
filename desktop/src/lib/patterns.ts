@@ -123,6 +123,80 @@ export const PATTERNS: Record<string, Pattern> = {
     explain:
       'Se parece mucho a un dato de fraude confirmado, sin ser idéntico.',
   },
+
+  // Señales del detector de sesiones sin liquidación (prueba de tarjetas).
+  // Existían en el motor desde el inicio pero no tenían traducción: el test
+  // de contrato sólo buscaba `fingerprints.append(...)` y este detector usa
+  // `fps.append(...)`, así que nadie se enteró. El analista veía el código
+  // crudo en inglés.
+  zero_settlement_session: {
+    label: 'Sesión sin liquidación',
+    explain:
+      'Muchos intentos de cobro y casi ninguno se liquidó. Es la forma ' +
+      'típica de quien está probando tarjetas robadas: lo que busca no es ' +
+      'cobrar, sino saber cuáles siguen activas.',
+  },
+  card_fanout_burst: {
+    label: 'Ráfaga de tarjetas',
+    explain:
+      'Cinco o más tarjetas distintas en menos de cinco minutos. A esa ' +
+      'velocidad no hay clientes reales, hay un script.',
+  },
+  card_fanout_session: {
+    label: 'Varias tarjetas en una hora',
+    explain:
+      'Tres o más tarjetas distintas dentro de la misma hora.',
+  },
+  card_fanout_slow: {
+    label: 'Varias tarjetas en el día',
+    explain:
+      'Varias tarjetas distintas repartidas a lo largo del día, ' +
+      'suficientemente lento como para no parecer una ráfaga.',
+  },
+  card_fanout_pair: {
+    label: 'Dos tarjetas seguidas',
+    explain:
+      'Dos tarjetas distintas en menos de media hora. Señal débil por sí ' +
+      'sola; cuenta cuando viene acompañada.',
+  },
+  card_diversity: {
+    label: 'Muchas tarjetas y BINs',
+    explain:
+      'Gran variedad de tarjetas y de bancos emisores para el tamaño de ' +
+      'la sesión.',
+  },
+  single_ip_multi_card: {
+    label: 'Una IP, muchas tarjetas',
+    explain:
+      'Varias tarjetas distintas desde una sola conexión. En LINK y QR la ' +
+      'IP es la del tarjetahabiente, así que deberían ser personas ' +
+      'distintas — no lo son.',
+  },
+  payer_identity_rotation: {
+    label: 'Identidades del pagador rotativas',
+    explain:
+      'Los nombres, correos o teléfonos del pagador cambian entre intentos ' +
+      'mientras el patrón de cobro sigue igual.',
+  },
+  near_duplicate_identity: {
+    label: 'Identidades casi idénticas',
+    explain:
+      'Nombres o correos que se parecen demasiado entre sí, como variantes ' +
+      'de un mismo dato inventado.',
+  },
+  repeated_decline_code: {
+    label: 'Mismo código de rechazo',
+    explain:
+      'El mismo motivo de rechazo una y otra vez, señal de que se está ' +
+      'reintentando de forma automática.',
+  },
+  unresolved_attempts_only: {
+    label: 'Intentos sin resolver',
+    explain:
+      'Ningún intento llegó a rechazarse ni a liquidarse: siguen ' +
+      'pendientes. Todavía no prueba nada, así que el hallazgo no puede ' +
+      'subir a Crítico hasta que se resuelvan.',
+  },
 };
 
 /** The one-line verdict, from `finding_type`. Mirrors classify_finding_type(). */
@@ -178,6 +252,19 @@ const RANK = [
   'cross_merchant_reuse',
   'channel_switch_retry',
   'amount_ladder',
+  // Señales de sesión sin liquidación, de la más concluyente a la más débil.
+  // Una ráfaga de tarjetas y una sola IP con muchas tarjetas dicen mucho más
+  // que el hecho de que la sesión no liquidara, así que van por encima.
+  'card_fanout_burst',
+  'single_ip_multi_card',
+  'card_fanout_session',
+  'payer_identity_rotation',
+  'near_duplicate_identity',
+  'card_fanout_slow',
+  'card_diversity',
+  'repeated_decline_code',
+  'card_fanout_pair',
+  'zero_settlement_session',
   'real_name_rotation',
   'multi_test_transactions',
   'bin_diversity_burst',
@@ -187,6 +274,8 @@ const RANK = [
   'critical_codes',
   'minfraud_blocked',
   'high_reject_rate',
+  // Último a propósito: dice que todavía no se sabe nada, no que algo pase.
+  'unresolved_attempts_only',
 ];
 
 export function rankPatterns(codes: string[]): string[] {

@@ -188,6 +188,20 @@ _PATTERN_LABEL = {
     'confirmed_indicator_exact':           'Fraude confirmado',
     'confirmed_indicator_cross_merchant':  'Confirmado en otro comercio',
     'confirmed_indicator_fuzzy':           'Parecido a fraude confirmado',
+    # Detector de sesiones sin liquidación. Sin traducir hasta 2026-09: el
+    # test de contrato sólo miraba `fingerprints.append(...)` y este detector
+    # usa `fps.append(...)`, así que el código crudo llegaba hasta Slack.
+    'zero_settlement_session':             'Sesión sin liquidación',
+    'card_fanout_burst':                   'Ráfaga de tarjetas',
+    'card_fanout_session':                 'Varias tarjetas en una hora',
+    'card_fanout_slow':                    'Varias tarjetas en el día',
+    'card_fanout_pair':                    'Dos tarjetas seguidas',
+    'card_diversity':                      'Muchas tarjetas y BINs',
+    'single_ip_multi_card':                'Una IP, muchas tarjetas',
+    'payer_identity_rotation':             'Identidades del pagador rotativas',
+    'near_duplicate_identity':             'Identidades casi idénticas',
+    'repeated_decline_code':               'Mismo código de rechazo',
+    'unresolved_attempts_only':            'Intentos sin resolver',
 }
 
 _TIER_LABEL = {'Critical': 'Crítico', 'Monitor': 'Monitor'}
