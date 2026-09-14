@@ -23,8 +23,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'runner'))
 import slack  # noqa: E402
 
 
+# Moved to the repo root 2026-09-13 so the web app could use it too. This file
+# had been silently exempt from noticing (see the main() note at the bottom).
 PATTERNS_TS = os.path.join(os.path.dirname(__file__), '..',
-                           'desktop', 'src', 'lib', 'patterns.ts')
+                           'shared', 'patterns.ts')
 MIGRATION_0012 = os.path.join(os.path.dirname(__file__), '..',
                               'supabase', 'migrations', '0012_runner_cycles.sql')
 
@@ -125,3 +127,33 @@ def test_outcome_label_covers_the_common_failures():
 def test_unknown_outcome_passes_through_rather_than_vanishing():
     """Better a raw code than silence about which failure it was."""
     assert slack.outcome_label('brand_new_failure') == 'brand_new_failure'
+
+
+# Every other test file in this directory ends with this block, and the module
+# docstring of several promises "run with plain python (no pytest required)".
+# This one never had it, so `python tests/test_slack_spanish.py` defined ten
+# test functions, called none of them, and exited 0 — indistinguishable from
+# passing to any runner that checks the exit code. pytest is not installed on
+# the maintainer's machine, so these ten checks had never run there at all.
+#
+# Found when patterns.ts moved: this file still pointed at the old path and
+# should have failed loudly, as three sibling contract tests did.
+def main():
+    tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
+    failures = 0
+    for t in tests:
+        try:
+            t()
+            print('  PASS  %s' % t.__name__)
+        except AssertionError as e:
+            failures += 1
+            print('  FAIL  %s: %s' % (t.__name__, e))
+        except Exception as e:                           # noqa: BLE001
+            failures += 1
+            print('  ERROR %s: %s: %s' % (t.__name__, type(e).__name__, e))
+    print('\n%d/%d passed' % (len(tests) - failures, len(tests)))
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
