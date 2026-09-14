@@ -100,6 +100,19 @@ def _tier(confidence) -> int:
     return _TIER_RANK.get(confidence, 0)
 
 
+# The tier names are English identifiers (they are column values), and every
+# string this module builds is read by a human: in Slack, and in the app's
+# "volvió porque …" line, which parses it back out of review_notes. Both were
+# showing "pasó de Monitor a Critical" verbatim.
+#
+# Monitor is the same word in Spanish, so only one of them actually changes.
+_TIER_ES = {'Critical': 'Crítico', 'Monitor': 'Monitor'}
+
+
+def _tier_es(confidence) -> str:
+    return _TIER_ES.get(confidence, confidence or 'Monitor')
+
+
 def escalation_reason(old_score, old_confidence, new_score, new_confidence):
     """Why this re-detection outranks the earlier rejection, or None.
 
@@ -113,7 +126,7 @@ def escalation_reason(old_score, old_confidence, new_score, new_confidence):
     there, which is why both rules exist rather than just the numeric one.
     """
     if _tier(new_confidence) > _tier(old_confidence) and new_confidence == 'Critical':
-        return f'subió de {old_confidence} a Critical'
+        return f'subió de {_tier_es(old_confidence)} a Crítico'
 
     old_score = old_score or 0
     new_score = new_score or 0
@@ -168,14 +181,14 @@ def decide(existing, finding, now=None):
     # reviewed, which is exactly the failure this whole tool exists to avoid.
     if status == 'not_applicable':
         promote = new_conf == 'Critical'
-        reason = ('escaló a Critical, entra a revisión' if promote
+        reason = ('escaló a Crítico, entra a revisión' if promote
                   else 'sigue en Monitor, se actualiza sin encolar')
         # A promotion is the most meaningful escalation there is: something
         # filed as informational now needs a human. A Monitor row that merely
         # gets a higher Monitor score is not worth interrupting anyone for.
         return Decision(
             UPDATE, reason, promote=promote, target_id=target,
-            escalated=(f'pasó de {old_conf or "Monitor"} a Critical'
+            escalated=(f'pasó de {_tier_es(old_conf)} a Crítico'
                        if promote else None),
         )
 

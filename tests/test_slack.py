@@ -34,13 +34,19 @@ import slack           # noqa: E402
 
 
 def _finding(name='ACME STORE', score=80, confidence='Critical',
-             exposure=1234.5, currency='USD', fingerprints=None):
+             exposure=1234.5, currency='USD', fingerprints=None,
+             settled=None, metrics=None):
     return {
         'company_name': name,
         'risk_score': score,
         'confidence': confidence,
         'estimated_chargeback_exposure': exposure,
         'currency': currency,
+        # How many settled charges the exposure figure is drawn from. The
+        # engine has emitted this since 2026-09-13; None models a finding
+        # written by an older one.
+        'suspicious_settled_count': settled,
+        'metrics': metrics or {},
         'fingerprints': fingerprints if fingerprints is not None
         else ['tarjetas_multiples'],
     }
@@ -106,7 +112,12 @@ def test_promotion_from_monitor_to_critical_is_news():
     assert decision.promote is True
     event = slack.notable(decision, _finding(score=85), 'exposure')
     assert event and event['kind'] == slack.ESCALATED
-    assert 'Critical' in event['detail']
+    # Spanish since 2026-09-14 — this detail is the line the channel shows
+    # under the merchant's name, so it cannot be an English column value.
+    assert 'Crítico' in event['detail']
+    assert 'Critical' not in event['detail']
+    # And a promotion is one of the two things the channel still announces.
+    assert slack.build_findings_message('PA', [event]) is not None
 
 
 def test_a_monitor_row_that_stays_monitor_is_not_news():
@@ -141,10 +152,98 @@ def test_no_events_produces_no_message():
     assert slack.build_findings_message('PA', []) is None
 
 
-def test_only_monitor_events_with_monitor_off_produces_no_message():
+def test_monitor_events_never_produce_a_message():
+    """The change that halved the traffic (2026-09-14).
+
+    A cycle with zero Critical findings used to post anyway, as long as one
+    Monitor merchant was new — and merchants roll through the two-day window
+    constantly, so that alone was roughly an alert an hour. Monitor is
+    recorded, reviewable in Pendientes, and silent here.
+    """
     events = [slack.notable(dedup.Decision(dedup.INSERT, 'x'),
-                            _finding(confidence='Monitor'), 'exposure')]
-    assert slack.build_findings_message('PA', events, monitor_mode='off') is None
+                            _finding(name=f'M{i}', confidence='Monitor'),
+                            'exposure')
+              for i in range(12)]
+    assert all(e is not None for e in events), 'still news, just not announced'
+    assert slack.build_findings_message('PA', events) is None
+
+
+def test_a_none_in_the_event_list_does_not_crash_the_cycle():
+    """_announce runs AFTER the findings are written and nothing wraps it in
+    a try/except, so an AttributeError here would fail a cycle that had
+    already done its job. notable() returns None for every re-detection, and
+    one reaching this list is a plausible mistake in a future caller."""
+    good = slack.notable(dedup.Decision(dedup.INSERT, 'x'), _finding(), 'exposure')
+    assert slack.announceable([None, good, None]) == [good]
+    assert slack.build_findings_message('PA', [None]) is None
+
+
+def test_a_reopened_finding_is_not_announced():
+    """A dismissed finding whose 48-hour cooloff expired is neither new nor
+    worse. It goes back into Pendientes, where the person who dismissed it
+    will see it; interrupting them about it is how a channel gets muted."""
+    decision = dedup.Decision(dedup.REOPEN, 'terminó el periodo de silencio')
+    event = slack.notable(decision, _finding(), 'exposure')
+    assert event['kind'] == slack.REOPENED
+    assert slack.build_findings_message('PA', [event]) is None
+
+
+def test_a_merchant_still_awaiting_review_is_not_re_announced():
+    """The complaint that prompted this: one alert an hour.
+
+    A Critical merchant sits inside the two-day window for ~16 cycles. Every
+    one of those re-detections is an UPDATE with no material change, which
+    notable() already drops — so there is nothing to announce and no message
+    at all, rather than a reminder about a merchant already in the queue.
+    """
+    existing = {'id': 'f1', 'review_status': 'pending',
+                'risk_score': 80, 'confidence': 'Critical'}
+    decision = dedup.decide(existing, _finding(score=81))
+    event = slack.notable(decision, _finding(score=81), 'exposure')
+    assert event is None
+    assert slack.build_findings_message('PA', [event] if event else []) is None
+
+
+def test_a_mixed_cycle_announces_only_the_critical_news():
+    """The realistic case: one new Critical among a crowd of things that are
+    real, recorded, and none of the channel's business."""
+    events = [
+        slack.notable(dedup.Decision(dedup.INSERT, 'x'),
+                      _finding(name='EL CRITICO'), 'exposure'),
+        slack.notable(dedup.Decision(dedup.INSERT, 'x'),
+                      _finding(name='UN MONITOR', confidence='Monitor'),
+                      'exposure'),
+        slack.notable(dedup.Decision(dedup.REOPEN, 'cooloff'),
+                      _finding(name='EL QUE VOLVIO'), 'exposure'),
+    ]
+    body = _text(slack.build_findings_message('PA', events))
+    assert 'EL CRITICO' in body
+    assert 'UN MONITOR' not in body
+    assert 'EL QUE VOLVIO' not in body
+
+
+def test_announceable_is_the_single_rule_the_message_obeys():
+    """The trigger and the contents must come from one filter.
+
+    A message that fires on one rule and renders by another eventually sends
+    an empty alert, so build_findings_message is required to have no opinion
+    of its own about what qualifies.
+    """
+    events = [
+        slack.notable(dedup.Decision(dedup.INSERT, 'x'), _finding(), 'exposure'),
+        slack.notable(dedup.Decision(dedup.INSERT, 'x'),
+                      _finding(name='M', confidence='Monitor'), 'exposure'),
+        slack.notable(dedup.Decision(dedup.REOPEN, 'c'), _finding(name='R'),
+                      'exposure'),
+    ]
+    announced = slack.announceable(events)
+    assert len(announced) == 1
+    assert all(e['confidence'] == 'Critical' for e in announced)
+    assert all(e['kind'] in slack.ANNOUNCED_KINDS for e in announced)
+    # And the message exists exactly when announceable() finds something.
+    assert (slack.build_findings_message('PA', events) is not None) is True
+    assert slack.build_findings_message('PA', [e for e in events
+                                               if e not in announced]) is None
 
 
 # ── The message ──────────────────────────────────────────────────────────────
@@ -203,7 +302,9 @@ def test_a_fallback_text_is_always_present():
     assert payload['text'] and len(payload['text']) > 0
 
 
-def test_critical_comes_before_monitor_and_new_before_the_rest():
+def test_new_comes_before_escalated_even_when_it_scores_lower():
+    """A merchant nobody has ever looked at outranks one already known to be
+    a problem, regardless of score. The channel is scanned top down."""
     events = [
         slack.notable(dedup.Decision(dedup.REOPEN, 'x', escalated='subió'),
                       _finding(name='SEGUNDO', score=99), 'exposure'),
@@ -214,17 +315,44 @@ def test_critical_comes_before_monitor_and_new_before_the_rest():
     assert body.index('PRIMERO') < body.index('SEGUNDO')
 
 
-def test_monitor_merchants_are_collapsed_into_one_line():
-    """Volume-safe by construction: however many Monitor findings a cycle
-    produces, they cost one line, not one message each."""
-    events = [slack.notable(dedup.Decision(dedup.INSERT, 'x'),
-                            _finding(name=f'M{i}', confidence='Monitor'),
-                            'exposure')
-              for i in range(12)]
-    payload = slack.build_findings_message('PA', events)
-    body = _text(payload)
-    assert '12' in body
-    assert 'M0' in body and 'M11' not in body, 'the tail becomes a count'
+def test_the_exposure_figure_carries_its_scope():
+    """A bare amount reads as the merchant's whole book — which is what it
+    used to mean, before the 2026-09-13 scoping fix narrowed it to the
+    charges a finding actually implicates. Slack kept printing the bare
+    number for a day longer than the apps did."""
+    body = _text(slack.build_findings_message(
+        'PA', _one_new(exposure=1200.0, settled=3)))
+    assert '1,200.00' in body
+    assert '3 cargo' in body and 'liquidado' in body
+
+
+def test_one_settled_charge_is_not_pluralised():
+    body = _text(slack.build_findings_message(
+        'PA', _one_new(exposure=340.0, settled=1)))
+    assert '1 cargo sospechoso liquidado' in body or '1 cargo liquidado' in body
+    assert 'cargos' not in body
+
+
+def test_an_old_payload_without_a_scope_does_not_invent_one():
+    """A finding written before the scoping fix has no count. Saying the
+    amount and stopping is honest; implying a scope nobody computed is not."""
+    body = _text(slack.build_findings_message(
+        'PA', _one_new(exposure=500.0, settled=None)))
+    assert '500.00' in body
+    assert 'liquidado' not in body
+
+
+def test_a_zero_settlement_session_says_what_it_actually_did():
+    """'sin liquidación' alone does not distinguish six attempts from six
+    hundred, and that is the difference between a shrug and a freeze."""
+    event = slack.notable(
+        dedup.Decision(dedup.INSERT, 'x'),
+        _finding(exposure=None, metrics={'attempts': 34, 'distinct_cards': 19,
+                                         'distinct_ips': 2}),
+        'zero_settlement')
+    body = _text(slack.build_findings_message('SV', [event]))
+    assert 'sin liquidación' in body
+    assert '34 intentos' in body and '19 tarjetas' in body and '2 IP' in body
 
 
 def test_a_flood_of_criticals_is_truncated_rather_than_unreadable():

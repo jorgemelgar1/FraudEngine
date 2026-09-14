@@ -195,10 +195,15 @@ SLACK_WEBHOOK_BY_COUNTRY = {
     code: _env(f'SLACK_WEBHOOK_URL_{code}') for code in ('SV', 'PA', 'GT')
 }
 
-# Whether new Monitor-tier merchants get a line of their own in the message.
-# 'summary' (default) collapses them to a count plus names; 'off' omits them
-# entirely. Critical findings are never suppressed by this.
-SLACK_MONITOR = (_env('SLACK_MONITOR', 'summary') or 'summary').strip().lower()
+# SLACK_MONITOR was removed on 2026-09-14. It chose how Monitor-tier findings
+# appeared in the channel; they no longer appear at all, so there is nothing
+# left for it to choose. An existing runner/.env that still sets it is
+# harmless - the line is simply ignored.
+#
+# The reason it went: with the default ('summary'), a cycle with ZERO Critical
+# findings still posted a message as long as one Monitor merchant was new.
+# Merchants roll through the two-day window constantly, so that alone produced
+# roughly an alert an hour and the channel stopped being read.
 
 # Consecutive failed cycles for one country before the channel hears about it.
 # Not 1: a single miss is absorbed by the overlapping windows, and alerting on

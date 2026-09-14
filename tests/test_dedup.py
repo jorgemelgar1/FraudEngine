@@ -206,7 +206,11 @@ def test_tier_crossing_reopens_even_without_a_score_jump():
                     suppressed_until=NOW + timedelta(hours=40))
     d = dedup.decide(row, _finding(score=100, confidence='Critical'), now=NOW)
     assert d.action == dedup.REOPEN
-    assert 'Critical' in d.reason
+    # The reason has to name the tier it crossed into — that is the whole
+    # justification for re-opening. In Spanish since 2026-09-14: this string
+    # is read by a human in Slack and in the app's "volvió porque …" line.
+    assert 'Crítico' in d.reason
+    assert 'Critical' not in d.reason
 
 
 def test_saturated_score_still_escalates_by_tier():

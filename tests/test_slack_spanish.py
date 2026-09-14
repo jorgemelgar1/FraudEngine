@@ -92,15 +92,18 @@ def test_finding_line_shows_spanish_not_fingerprint_keys():
     assert 'critical_codes' not in line
 
 
-def test_finding_line_translates_the_tier():
-    assert 'Crítico' in slack._finding_line(_event(), 'PA')
-    assert 'Critical' not in slack._finding_line(_event(), 'PA')
+def test_no_english_tier_identifier_survives_into_a_line():
+    """The tier itself is no longer printed (2026-09-14): every finding that
+    reaches a message is Critical, so the word carried no information.
 
-
-def test_monitor_tier_is_left_alone():
-    """Monitor is the same word in Spanish. Translating it would be worse."""
-    line = slack._finding_line(_event(confidence='Monitor'), 'GT')
-    assert 'Monitor' in line
+    What still matters is the original complaint — the raw English
+    identifier must never appear. This now holds because the tier is absent
+    rather than because it is translated, which is a stronger guarantee, so
+    the check stays even though the label map it used to guard is gone.
+    """
+    line = slack._finding_line(_event(), 'PA')
+    assert 'Critical' not in line
+    assert 'Monitor' not in line
 
 
 def test_unknown_fingerprint_is_humanised_not_raw():
@@ -116,6 +119,29 @@ def test_no_underscore_key_survives_into_a_whole_message():
     blob = str(msg)
     for key in slack._PATTERN_LABEL:
         assert key not in blob, f'{key} reached the message unlabelled'
+
+
+def test_the_escalation_reason_does_not_leak_the_english_tier():
+    """dedup builds the sentence that says WHY something is being announced,
+    and it is read in two places — the Slack line and the app's "volvió
+    porque …". Both were printing "pasó de Monitor a Critical" verbatim.
+
+    Found 2026-09-14 by rendering a real message rather than by reading the
+    code; the tier only became conspicuous once the detail line was promoted
+    up the block.
+    """
+    import dedup  # noqa: PLC0415  (kept local; only this test needs it)
+
+    crossed = dedup.escalation_reason(40, 'Monitor', 85, 'Critical')
+    assert 'Critical' not in crossed, crossed
+    assert 'Crítico' in crossed
+
+    promoted = dedup.decide(
+        {'id': 'x', 'review_status': 'not_applicable',
+         'risk_score': 40, 'confidence': 'Monitor'},
+        {'risk_score': 85, 'confidence': 'Critical'})
+    assert 'Critical' not in (promoted.escalated or ''), promoted.escalated
+    assert 'Critical' not in promoted.reason, promoted.reason
 
 
 def test_outcome_label_covers_the_common_failures():

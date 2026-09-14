@@ -426,8 +426,16 @@ def process(source: Source, dry_run: bool = False,
             # that is not in the queue.
             _announce(findings, events)
         elif events:
-            log(f'DRY RUN - se habrían anunciado {len(events)} hallazgo(s) '
-                f'en Slack')
+            # Count what would ACTUALLY have been sent, not what was merely
+            # notable - a dry run that reports five and then sends nothing on
+            # the real pass is worse than no number at all.
+            would_send = slack.announceable(events)
+            if would_send:
+                log(f'DRY RUN - se habrían anunciado {len(would_send)} '
+                    f'comercio(s) crítico(s) en Slack')
+            else:
+                log(f'DRY RUN - Slack habría quedado en silencio '
+                    f'({len(events)} novedad(es) sin criticidad nueva)')
 
         log()
         log(f'nuevos {counts[dedup.INSERT]} · '
@@ -466,15 +474,29 @@ def _announce(findings: dict, events: list):
     if not events:
         log('Slack: sin novedades — lo detectado ya estaba en la cola')
         return
+
+    # Silence is now the common case rather than the exception, so it has to
+    # be self-explanatory in the log. "There was news, and none of it was
+    # announceable" is a completely different state from "there was no news",
+    # and after 2026-09-14 it is the one that happens most: a new Monitor
+    # merchant, or a Critical whose cooloff simply expired.
+    announced = slack.announceable(events)
+    if not announced:
+        held = len(events) - len(announced)
+        log(f'Slack: en silencio — {held} novedad(es) sin criticidad nueva '
+            f'(Monitor, o reaparición sin escalar). Están en Pendientes.')
+        return
+
     country = country_code_of(findings)
     if not config.slack_enabled(country):
         log(f'Slack: desactivado para {(country or "?").upper()}')
         return
     if slack.send_findings(country, events, findings.get('summary')):
-        log(f'Slack: {len(events)} hallazgo(s) anunciados')
+        log(f'Slack: {len(announced)} comercio(s) crítico(s) anunciados')
     else:
         # post() already printed the HTTP reason; this says what was lost.
-        log(f'Slack: NO se pudo anunciar {len(events)} hallazgo(s)')
+        log(f'Slack: NO se pudo anunciar {len(announced)} comercio(s) '
+            f'crítico(s)')
 
 
 def classify_failure(exc):

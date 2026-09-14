@@ -2,7 +2,7 @@
 
 Two kinds of message, one channel:
 
-  findings   something new or materially worse was detected
+  findings   a CRITICAL merchant is new, worse, or back
   health     the runner itself is in trouble
 
 **The hard part is not sending, it is NOT sending.** The runner analyses a
@@ -17,6 +17,25 @@ decided this is news": a first detection, a score that climbed materially, or
 a crossing into Critical. That decision already exists in dedup.py, is a pure
 function, and has its own tests. `notable()` below is the single place that
 projects it into "worth telling someone".
+
+**Critical only, and only three states, since 2026-09-14.** Two doors were
+open and both produced volume nobody could keep up with:
+
+  * Monitor findings reached the channel, collapsed to one line but still
+    enough to SEND a message. A cycle with zero Critical findings and one new
+    Monitor merchant posted anyway, and since merchants roll through the
+    two-day window constantly, that alone was roughly an alert an hour.
+
+  * Nothing distinguished "this merchant is new" from "this merchant is
+    still here". Anything already awaiting review is the app's job to show,
+    not the channel's - a notification about something a person has already
+    been told about is how a channel gets muted.
+
+So the channel now hears exactly two things about fraud: a merchant that is
+newly Critical, and one that has just become Critical (or materially worse)
+having not been. Everything else - Monitor, re-detections, a dismissed
+finding whose cooloff expired, the depth of the queue - belongs to Pendientes
+and Historial, and to the one daily queue nudge.
 
 Design rules, all of them learned elsewhere in this codebase:
 
@@ -67,6 +86,16 @@ NEW = 'new'
 ESCALATED = 'escalated'
 REOPENED = 'reopened'
 
+# The kinds that reach Slack. REOPENED is deliberately absent: a dismissed
+# finding whose 48-hour cooloff has expired is neither new nor worse - it is
+# simply eligible again. It lands in Pendientes, where the person who
+# dismissed it will see it. Interrupting someone about a merchant they have
+# already judged once is precisely how a channel earns a mute.
+#
+# notable() still PRODUCES it, because the runner logs it and a future
+# consumer may want it. Only the message filters on this.
+ANNOUNCED_KINDS = (NEW, ESCALATED)
+
 
 def notable(decision, finding, section):
     """Project a dedup Decision into a notification event, or None.
@@ -92,6 +121,11 @@ def notable(decision, finding, section):
         # UPDATE with no material change, or SUPPRESS. This is most of them.
         return None
 
+    # The zero-settlement detector puts its counts under `metrics`; the
+    # exposure model has none. Read defensively either way - a finding from an
+    # engine older than a field is a normal thing to receive here.
+    metrics = finding.get('metrics') or {}
+
     return {
         'kind':         kind,
         'company_name': finding.get('company_name') or '(sin nombre)',
@@ -100,6 +134,14 @@ def notable(decision, finding, section):
         'risk_score':   finding.get('risk_score'),
         'exposure':     finding.get('estimated_chargeback_exposure'),
         'currency':     finding.get('currency'),
+        # How much of the merchant's book the exposure figure is drawn from.
+        # Without it the channel prints a bare amount, which reads as the
+        # merchant's whole trade - the misreading the 2026-09-13 scoping work
+        # exists to prevent, still live in Slack until now.
+        'settled_count': finding.get('suspicious_settled_count'),
+        'attempts':      metrics.get('attempts'),
+        'cards':         metrics.get('distinct_cards'),
+        'ips':           metrics.get('distinct_ips'),
         'fingerprints': list(finding.get('fingerprints') or []),
         'detail':       detail,
     }
@@ -162,6 +204,14 @@ _KIND_LABEL = {
     REOPENED:  'VOLVIÓ',
 }
 
+# An emoji per kind, so the two states are separable at a glance on a phone
+# without reading the word. Slack renders these from their shortcodes.
+_KIND_ICON = {
+    NEW:       ':new:',
+    ESCALATED: ':chart_with_upwards_trend:',
+    REOPENED:  ':leftwards_arrow_with_hook:',
+}
+
 
 # Fingerprints and tiers arrive from the engine as English snake_case keys.
 # They are identifiers, not prose, and a channel read by ops in Spanish should
@@ -204,7 +254,16 @@ _PATTERN_LABEL = {
     'unresolved_attempts_only':            'Intentos sin resolver',
 }
 
-_TIER_LABEL = {'Critical': 'Crítico', 'Monitor': 'Monitor'}
+# The confidence tier used to be printed on every line ("Crítico, puntaje
+# 92"), and had its own label map because `Critical` is an English identifier
+# and ops reads this channel in Spanish.
+#
+# Both are gone as of 2026-09-14. Every finding that reaches a message is
+# Critical — announceable() admits nothing else — so the word carried no
+# information and cost a line's worth of width on a phone. The header says
+# "críticos" once, which is where it belongs.
+#
+# If Monitor ever returns to the channel, this needs to come back with it.
 
 
 # The runner_cycles.outcome vocabulary (migration 0012). Same reasoning as
@@ -242,34 +301,75 @@ def pattern_label(fingerprint) -> str:
     return fp.replace('_', ' ').capitalize() if fp else '?'
 
 
-def tier_label(confidence) -> str:
-    """Critical -> Crítico. Monitor is already the same word in both."""
-    return _TIER_LABEL.get(confidence, confidence or '?')
+def _scope_line(event) -> str:
+    """What this merchant actually did, in money or in attempts.
+
+    Two shapes, because the two detectors measure different things and a
+    bare number from either one is misread. An exposure figure without its
+    scope reads as the merchant's whole trade - which is what it used to
+    mean, before the 2026-09-13 fix narrowed it to the charges a finding
+    actually implicates. And "sin liquidación" on its own says nothing about
+    whether the session was six attempts or six hundred.
+    """
+    exposure = event.get('exposure')
+    settled = event.get('settled_count')
+
+    if exposure:
+        money = _money(exposure, event.get('currency'))
+        if settled:
+            s = '' if settled == 1 else 's'
+            return f'exposición {money} sobre {settled} cargo{s} liquidado{s}'
+        # An older payload with no scope recorded. Say the amount and stop
+        # rather than implying a scope nobody computed.
+        return f'exposición {money}'
+
+    # Nothing settled: the session is the story. Counts come from the
+    # zero-settlement detector's own metrics and are simply absent on an
+    # exposure-model finding, which is fine - it then reads "sin liquidación".
+    bits = []
+    if event.get('attempts'):
+        bits.append(f'{event["attempts"]} intentos')
+    if event.get('cards'):
+        bits.append(f'{event["cards"]} tarjetas')
+    if event.get('ips'):
+        bits.append(f'{event["ips"]} IP')
+    return 'sin liquidación' + (' · ' + ' · '.join(bits) if bits else '')
 
 
 def _finding_line(event, country_code) -> str:
-    # The country is on every line as well as in the header, because ops is
-    # split by country and "is this mine?" should be answerable from any
-    # single line - a forwarded screenshot, a quoted reply, or a header that
-    # has scrolled away. The short code rather than the full name: four
-    # repetitions of "Panamá (PA)" in one message is noise, and the header
-    # already spells it out.
-    #
-    # It is the country of the FILE (from its own country_name column), so
-    # within one message it is necessarily the same on every line - one
-    # report is one country.
-    tier = event.get('confidence') or '?'
+    """One merchant, as a block. Four lines at most, in priority order:
+
+        what happened · who · how bad
+        why it is being announced   (only when it says something new)
+        what is at stake
+        which patterns fired
+
+    The country is on the line as well as in the header, because ops is split
+    by country and "is this mine?" should be answerable from any single line -
+    a forwarded screenshot, a quoted reply, or a header that has scrolled
+    away. The short code rather than the full name: four repetitions of
+    "Panamá (PA)" in one message is noise.
+
+    It is the country of the FILE (from its own country_name column), so
+    within one message it is necessarily the same on every line - one report
+    is one country.
+    """
     score = event.get('risk_score')
     code = (country_code or '??').upper()
+    kind = event['kind']
+
     parts = [
-        f'*{_KIND_LABEL.get(event["kind"], event["kind"])}* · '
-        f'*{_esc(event["company_name"])}* · `{_esc(code)}`',
-        f'{tier_label(tier)}, puntaje {score if score is not None else "?"}'
-        + ('  ·  sin liquidación' if event.get('section') == 'zero_settlement'
-           else f'  ·  exposición {_money(event.get("exposure"), event.get("currency"))}'),
+        f'{_KIND_ICON.get(kind, "")} *{_KIND_LABEL.get(kind, kind)}* · '
+        f'*{_esc(event["company_name"])}* · `{_esc(code)}` — '
+        f'puntaje *{score if score is not None else "?"}*'.lstrip(),
     ]
-    if event.get('detail'):
-        parts.append(f'_{_esc(event["detail"])}_')
+    # 'primera detección' beside a line already labelled NUEVO is a word doing
+    # no work. An escalation's detail carries the old score and the new one,
+    # which is the whole reason anyone is being told.
+    detail = event.get('detail')
+    if detail and kind != NEW:
+        parts.append(f'_{_esc(detail)}_')
+    parts.append(_scope_line(event))
     fingerprints = event.get('fingerprints') or []
     if fingerprints:
         parts.append(' · '.join(_esc(pattern_label(f))
@@ -286,45 +386,64 @@ def _context(text) -> dict:
             'elements': [{'type': 'mrkdwn', 'text': _clip(text, MAX_TEXT)}]}
 
 
-def build_findings_message(country_code, events, summary=None,
-                           monitor_mode=None):
+def announceable(events):
+    """The subset of a cycle's events the channel is allowed to hear about.
+
+    One place, so the trigger and the contents can never disagree - a message
+    that fires on one rule and renders by another is how an empty alert gets
+    sent. Two filters, and both are load-bearing:
+
+      confidence  Critical only. Monitor is recorded, reviewable in the apps,
+                  and silent here.
+      kind        NEW or ESCALATED. Not REOPENED - see ANNOUNCED_KINDS.
+
+    Tolerates a None in the list. notable() returns None for the common
+    re-detection and run.py already drops those before they get here, but
+    this is the notification path: it runs AFTER the findings are safely
+    written, and nothing wraps it in a try/except. An AttributeError here
+    would fail a cycle that had already done its job perfectly - which is
+    the one outcome this module promises never to cause.
+    """
+    return [e for e in (events or []) if e
+            and e.get('confidence') == 'Critical'
+            and e.get('kind') in ANNOUNCED_KINDS]
+
+
+def build_findings_message(country_code, events, summary=None):
     """The Slack payload for one cycle's news, or None if there is none.
 
     Returning None rather than an empty message is deliberate: a quiet cycle
     should produce silence, not a "nothing to report" that trains people to
     skim past the channel.
+
+    What reaches here is only ever a merchant that is newly Critical or has
+    just become Critical. Everything else a cycle produces - Monitor findings,
+    the fifteen re-detections of a merchant already in the queue, a dismissed
+    finding whose cooloff expired - is the apps' job to show. A notification
+    about something a person has already been told about is how a channel
+    gets muted, and then the message that matters arrives somewhere nobody
+    looks.
     """
-    if not events:
+    critical = announceable(events)
+    if not critical:
         return None
 
-    monitor_mode = (monitor_mode or config.SLACK_MONITOR or 'summary').lower()
     summary = summary or {}
-
-    critical = [e for e in events if e.get('confidence') == 'Critical']
-    monitor = [e for e in events if e.get('confidence') != 'Critical']
-    if monitor_mode == 'off':
-        monitor = []
-
-    if not critical and not monitor:
-        return None
 
     n_new = sum(1 for e in critical if e['kind'] == NEW)
     n_esc = sum(1 for e in critical if e['kind'] == ESCALATED)
-    n_back = sum(1 for e in critical if e['kind'] == REOPENED)
 
     headline = []
     if n_new:
-        headline.append(f'{n_new} nuevo{"s" if n_new != 1 else ""}')
+        headline.append(f'{n_new} crítico{"s" if n_new != 1 else ""} '
+                        f'nuevo{"s" if n_new != 1 else ""}')
     if n_esc:
-        headline.append(f'{n_esc} escaló' if n_esc == 1 else f'{n_esc} escalaron')
-    if n_back:
-        headline.append(f'{n_back} volvió' if n_back == 1 else f'{n_back} volvieron')
-    if not headline and monitor:
-        headline.append(f'{len(monitor)} en Monitor')
+        headline.append(f'{n_esc} escaló a crítico' if n_esc == 1
+                        else f'{n_esc} escalaron a crítico')
 
-    icon = ':rotating_light:' if critical else ':mag:'
     header = _clip(
-        f'{icon} {country_label(country_code)} — {", ".join(headline)}',
+        f':rotating_light: {country_label(country_code)} — '
+        f'{", ".join(headline)}',
         MAX_HEADER)
 
     blocks = [{'type': 'header',
@@ -339,9 +458,9 @@ def build_findings_message(country_code, events, summary=None,
     if meta:
         blocks.append(_context(' · '.join(meta)))
 
-    # Critical first and worst-first inside that: the channel is scanned top
-    # down, and the thing needing action should never be below the thing that
-    # does not.
+    # New before escalated, worst-first inside each: the channel is scanned
+    # top down, and a merchant nobody has ever looked at outranks one that is
+    # already known and has got worse.
     ordered = sorted(
         critical,
         key=lambda e: (e['kind'] != NEW, -(e.get('risk_score') or 0)))
@@ -351,14 +470,7 @@ def build_findings_message(country_code, events, summary=None,
 
     if len(ordered) > MAX_LISTED:
         blocks.append(_context(
-            f'…y {len(ordered) - MAX_LISTED} hallazgo(s) crítico(s) más.'))
-
-    if monitor:
-        names = ', '.join(_esc(e['company_name']) for e in monitor[:8])
-        more = f' y {len(monitor) - 8} más' if len(monitor) > 8 else ''
-        blocks.append(_context(
-            f'*Monitor* · {len(monitor)} merchant(s) '
-            f'nuevos o con cambios: {names}{more}'))
+            f'…y {len(ordered) - MAX_LISTED} comercio(s) crítico(s) más.'))
 
     blocks.append(_context(
         'Revisar en *Pendientes* de la app · '
