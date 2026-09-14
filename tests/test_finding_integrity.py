@@ -367,6 +367,96 @@ def test_monitor_findings_carry_the_rows_that_triggered_them():
             assert 'transaction_id' in e and 'status' in e, e
 
 
+def _victim_merchant_with_an_attack():
+    """A real business with a small attack inside it.
+
+    200 honest sales of 250 (= 50,000 of legitimate trade), then an 8-card
+    testing burst, two of whose cards also settled 400 each. Only that 800 is
+    plausibly at risk from this pattern.
+    """
+    rows = []
+    for i in range(200):
+        rows.append(_row(
+            transaction_id='S%d' % i, company_name='TIENDA', amount='250',
+            status='SUCCEEDED', transaction_created_at=_stamp(i),
+            last_intent_at=_stamp(i), card_last_digits='%04d' % (1000 + i),
+            bin_card_number='555555', card_holder='CLIENTE %d' % i,
+            rejection_reason='', ip='10.1.1.%d' % (i % 200),
+            client_name='C%d' % i, client_email='c%d@x.com' % i))
+    for i in range(8):
+        rows.append(_row(
+            transaction_id='F%d' % i, company_name='TIENDA', amount='100',
+            status='REJECTED', transaction_created_at=_stamp(900 + i),
+            last_intent_at=_stamp(900 + i), card_last_digits='%04d' % (7000 + i),
+            bin_card_number='%06d' % (433333 + i), card_holder='ATACANTE %d' % i,
+            rejection_reason='05 - SOSPECHA DE FRAUDE', ip='9.9.9.9',
+            client_name='A%d' % i, client_email='a%d@x.com' % i))
+    for i in range(2):
+        rows.append(_row(
+            transaction_id='FS%d' % i, company_name='TIENDA', amount='400',
+            status='SUCCEEDED', transaction_created_at=_stamp(910 + i),
+            last_intent_at=_stamp(910 + i), card_last_digits='%04d' % (7000 + i),
+            bin_card_number='%06d' % (433333 + i), card_holder='ATACANTE %d' % i,
+            rejection_reason='', ip='9.9.9.9',
+            client_name='A%d' % i, client_email='a%d@x.com' % i))
+    return rows
+
+
+def test_exposure_counts_only_the_suspicious_charges():
+    """Exposure used to be every settled charge at a flagged merchant.
+
+    A merchant taking a card-testing attack is usually a victim with a real
+    business, so that summed its legitimate trade into "chargeback exposure" —
+    50,800 here when 800 is at risk. It also inflated the dashboard total, and
+    sent an analyst to review 202 successful charges to find 2.
+    """
+    out = analyze.analyze(_write(_victim_merchant_with_an_attack(), 'victim.csv'))
+    findings = [f for f in _all_findings(out) if f['company_name'] == 'TIENDA']
+    assert findings, 'the attack produced no finding'
+    f = findings[0]
+
+    assert f['estimated_chargeback_exposure'] == 800.0, \
+        'exposure is %s; only the 2 settled charges on implicated cards are at risk' % (
+            f['estimated_chargeback_exposure'],)
+    assert f['merchant_settled_total'] == 50800.0, \
+        'the wider figure must still be available for a freeze decision'
+    assert f['suspicious_settled_count'] == 2, f['suspicious_settled_count']
+    assert f['total_transactions'] == 210, f['total_transactions']
+    assert f['suspicious_transaction_count'] < 20, \
+        'scoped to %d of 210 transactions — that is not a shortlist' % (
+            f['suspicious_transaction_count'],)
+
+
+def test_exposure_follows_the_card_not_just_the_triggering_row():
+    """A card caught testing that also settled a charge puts that charge at
+    risk, even though the settled row is not what fired the rule. Scoping to
+    the triggering rows alone would report zero exposure here."""
+    out = analyze.analyze(_write(_victim_merchant_with_an_attack(), 'victim2.csv'))
+    f = [x for x in _all_findings(out) if x['company_name'] == 'TIENDA'][0]
+    assert f['estimated_chargeback_exposure'] > 0, \
+        'settled charges on an implicated card were missed entirely'
+
+
+def test_evidence_names_the_attack_not_the_honest_customers():
+    out = analyze.analyze(_write(_victim_merchant_with_an_attack(), 'victim3.csv'))
+    f = [x for x in _all_findings(out) if x['company_name'] == 'TIENDA'][0]
+    quoted = {e['card_last_digits'] for e in f['evidence']}
+    honest = {'%04d' % (1000 + i) for i in range(200)}
+    assert not (quoted & honest), 'evidence names honest customers: %s' % (quoted & honest)
+
+
+def test_the_action_text_points_at_the_shortlist():
+    """The wording has to match the number beside it. "Review the 412
+    successful charges" reads as a day's work and gets deprioritised."""
+    text = analyze.build_action_es('FREEZE_MERCHANT', 2, 800.0, 'GTQ')
+    assert '2 cargos sospechosos' in text, text
+    assert 'GTQ 800.00' in text, text
+
+    # Nothing settled: say so plainly rather than quoting a zero.
+    none_settled = analyze.build_action_es('FREEZE_MERCHANT', 0, 0.0, 'GTQ')
+    assert 'Ningún cargo' in none_settled, none_settled
+
+
 def test_pending_only_session_cannot_reach_critical():
     """PENDING means the payment has not resolved. Six pending checkouts used
     to score Critical/100 with no decline and no aging rule, which is

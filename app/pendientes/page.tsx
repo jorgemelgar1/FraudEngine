@@ -70,6 +70,34 @@ function zeroSettlementSummary(payload: Record<string, unknown>): string {
   return `${attempts} intentos · ${cards} tarjetas · ${ips} IP`;
 }
 
+// How much of the merchant's book the exposure figure actually covers.
+//
+// The figure is now scoped to the suspicious transactions rather than every
+// settled charge at the merchant, and that distinction is invisible from an
+// amount alone: an analyst who reads "Exposición: GTQ 800" next to a merchant
+// that turned over 50,800 cannot tell whether 800 is the shortlist or a quiet
+// merchant. Saying "2 de 210 transacciones" is the difference between a lead
+// and an afternoon of reading.
+//
+// Returns '' when the payload predates these fields, so old findings render
+// exactly as they did. Display-only — must never throw.
+function exposureScope(payload: Record<string, unknown>): string {
+  const p = payload as {
+    suspicious_settled_count?: unknown;
+    suspicious_transaction_count?: unknown;
+    total_transactions?: unknown;
+  };
+  const settled = Number(p?.suspicious_settled_count ?? NaN);
+  const suspicious = Number(p?.suspicious_transaction_count ?? NaN);
+  const total = Number(p?.total_transactions ?? NaN);
+  if (!Number.isFinite(suspicious) || !Number.isFinite(total) || total <= 0) return '';
+
+  if (Number.isFinite(settled) && settled > 0) {
+    return `${settled} cargo${settled === 1 ? '' : 's'} sospechoso${settled === 1 ? '' : 's'} liquidado${settled === 1 ? '' : 's'}, de ${suspicious} transacciones marcadas (el merchant tiene ${total})`;
+  }
+  return `ningún cargo sospechoso se liquidó · ${suspicious} de ${total} transacciones marcadas`;
+}
+
 export default function PendientesPage() {
   const router = useRouter();
   const [findings, setFindings] = useState<PendingFinding[] | null>(null);
@@ -304,6 +332,9 @@ export default function PendientesPage() {
                           ) : (
                             <span className="muted" style={{ marginLeft: '0.75rem' }}>
                               Exposición: {fmtCurrency(f.chargeback_exposure_usd, f.chargeback_exposure_currency)}
+                              {exposureScope(f.payload) && (
+                                <> · {exposureScope(f.payload)}</>
+                              )}
                             </span>
                           )}
                           <p style={{ margin: '0.4rem 0', fontSize: '0.95rem' }}>

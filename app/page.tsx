@@ -513,8 +513,13 @@ export default function HomePage() {
                 <Kpi label="Crítico" value={fmtNumber(results.summary.total_critical_findings)} />
                 <Kpi label="Monitorear" value={fmtNumber(results.summary.total_monitor_findings)} />
                 <Kpi label="Hits en Watchlist" value={fmtNumber(results.summary.total_watchlist_hits)} />
+                {/* Scoped to the suspicious charges, not every settled charge
+                    at a flagged merchant. The label has to say which, because
+                    the figure dropped sharply when that changed and an
+                    unexplained fall in a fraud number reads as a broken
+                    report. */}
                 <Kpi
-                  label={`Exposición CB (${results.summary.currency || 'USD'})`}
+                  label={`Exposición CB · cargos sospechosos (${results.summary.currency || 'USD'})`}
                   value={fmtCurrency(
                     results.summary.estimated_chargeback_exposure,
                     results.summary.currency,

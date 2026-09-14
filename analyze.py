@@ -1508,6 +1508,15 @@ def detect_suspicious_rejected_merchants(
                 f"cuenta para probar tarjetas robadas."
             ),
             'action_code': 'REVIEW_MERCHANT',
+            # Usually 0 — that is what "zero settlement" means — but the gate
+            # admits up to ZERO_SETTLEMENT_MAX_SUCCESS_RATE, and those few
+            # settled charges are real chargeback risk. Reported rather than
+            # left NULL so this section's findings can be compared with the
+            # exposure model's on the same basis.
+            'estimated_chargeback_exposure': round(
+                float(m[m['status'] == 'SUCCEEDED']['amount'].sum()) if n_succ else 0.0, 2),
+            'suspicious_transaction_count': n_attempts,
+            'suspicious_settled_count': n_succ,
             'metrics': metrics,
             'evidence': evidence,
             'currency': currency,
@@ -2614,19 +2623,54 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
             )
 
         # Build finding object
+        # ── Which transactions this finding is actually about ─────────────
+        #
+        # The triggering rows, plus every other row at this merchant on a card
+        # the triggers implicated. A card caught in a testing burst that also
+        # settled two charges here puts those two charges at risk, even though
+        # neither was the row that fired the rule — so the card, not just the
+        # row, defines the blast radius.
+        #
+        # Everything else the merchant did stays out. That is the whole point:
+        # an analyst should open a finding and see the transactions to look
+        # at, not the merchant's entire trading history to sift through.
+        suspicious_ids = set(trigger_ids)
+        trigger_rows = group[group['transaction_id'].astype(str).isin(trigger_ids)]
+        implicated_cards = set(trigger_rows['card_key'].dropna())
+        if implicated_cards:
+            suspicious_ids.update(
+                str(t) for t in
+                group.loc[group['card_key'].isin(implicated_cards), 'transaction_id']
+            )
+
+        suspicious_rows = group[group['transaction_id'].astype(str).isin(suspicious_ids)]
+        suspicious_settled = suspicious_rows[suspicious_rows['status'] == 'SUCCEEDED']
+
         ticket_rows = group[succeeded_mask]
-        # Chargeback-exposure rule (post-2026-05): every succeeded charge at a
-        # merchant that lands in the Critical tier is treated as at-risk for
-        # chargeback, regardless of which fingerprint fired. The previous rule
-        # only counted exposure when ladder/velocity/switch were among the
-        # fingerprints, which silently zeroed out merchants whose dominant
-        # pattern was watchlist hit, BIN diversity, foreign-card velocity,
-        # MinFraud block, name rotation, or cross-merchant reuse. The risk-
-        # score gate is implicit: exposure is only written to the output
-        # for risk_score >= 70 (the Critical branch below); we compute it
-        # unconditionally because the cost is trivial and it keeps the value
-        # available for any future reuse.
-        exposure = float(ticket_rows['amount'].sum()) if len(ticket_rows) > 0 else 0.0
+        # Chargeback exposure: the settled charges this finding implicates.
+        #
+        # History of this line, because it has now been wrong in both
+        # directions. Originally exposure was counted only when ladder,
+        # velocity or switch fired, which zeroed it out for merchants whose
+        # dominant pattern was a watchlist hit, BIN diversity, foreign-card
+        # velocity, a MinFraud block, name rotation or cross-merchant reuse.
+        # The 2026-05 fix replaced that with every settled charge at any
+        # Critical merchant — which never under-reported, and started
+        # over-reporting instead.
+        #
+        # A merchant taking a card-testing attack is usually a victim with a
+        # real business. Summing its legitimate trade into "chargeback
+        # exposure" inflated the figure, and left the analyst opening a
+        # finding and being handed the merchant's whole history to sift.
+        #
+        # Scoped to the suspicious set now: what could plausibly be charged
+        # back because of THIS pattern. `merchant_settled_total` below keeps
+        # the wider number for context, so the decision to freeze an account
+        # can still weigh the whole relationship.
+        exposure = (float(suspicious_settled['amount'].sum())
+                    if len(suspicious_settled) > 0 else 0.0)
+        merchant_settled_total = (float(ticket_rows['amount'].sum())
+                                  if len(ticket_rows) > 0 else 0.0)
 
         # Evidence: the rows the detectors named, not the first rows in the
         # file. df_u is already globally time-sorted, so the selected slice
@@ -2664,7 +2708,11 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
             # told, so it leads the description rather than trailing it.
             if merchant_indicator_hits:
                 description = build_indicator_description_es(merchant_indicator_hits) + ' ' + description
-            action_es = build_action_es(action_code, len(ticket_rows), exposure, currency)
+            # The count that goes in the action text is the suspicious settled
+            # charges, matching the exposure figure beside it. Telling an
+            # analyst to "review the 412 successful charges" when 3 are
+            # implicated is how a finding becomes a chore instead of a lead.
+            action_es = build_action_es(action_code, len(suspicious_settled), exposure, currency)
             critical_findings.append({
                 'type': classify_finding_type(fingerprints),
                 'company_name': mname,
@@ -2677,6 +2725,12 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
                 'recommended_action_es': action_es,
                 'action_code': action_code,
                 'estimated_chargeback_exposure': round(exposure, 2),
+                # What the exposure figure is drawn from, so an analyst can
+                # see the scope without re-deriving it, and so the wider
+                # number is still available for a freeze decision.
+                'suspicious_transaction_count': len(suspicious_rows),
+                'suspicious_settled_count': len(suspicious_settled),
+                'merchant_settled_total': round(merchant_settled_total, 2),
                 'currency': currency,
                 'total_transactions': n_total,
                 'rejected_count': n_rej,
@@ -2698,6 +2752,16 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
                 'description_es': description,
                 'action_code': 'MONITOR',
                 'evidence_count': n_total,
+                # Same scoping as a Critical finding. A Monitor finding is
+                # still something an analyst reads in Historial, and "2 of
+                # these 210 charges are the ones I mean" is the difference
+                # between a lead and a filing cabinet.
+                'estimated_chargeback_exposure': round(exposure, 2),
+                'suspicious_transaction_count': len(suspicious_rows),
+                'suspicious_settled_count': len(suspicious_settled),
+                'merchant_settled_total': round(merchant_settled_total, 2),
+                'currency': currency,
+                'total_transactions': n_total,
                 # The rows that triggered it, same as a Critical finding gets.
                 # Without these a Monitor finding was a score and a sentence
                 # with nothing behind them: an analyst opening one in Historial
@@ -2833,7 +2897,16 @@ def analyze(csv_path, watchlist_path=None, indicators_path=None):
         'total_monitor_findings': len(monitor_findings),
         'total_duplicate_findings': len(duplicates),
         'total_watchlist_hits': len(watchlist_hits_merchants),
-        'estimated_chargeback_exposure': round(sum(f.get('estimated_chargeback_exposure', 0) for f in critical_findings), 2),
+        # Every Critical finding, not just the exposure model's. Since
+        # deduplication started going by severity, a merchant's Critical
+        # finding can live in the zero-settlement section, and summing only
+        # critical_findings would silently omit it from the headline number.
+        # `or 0` because that section reports NULL when nothing settled.
+        'estimated_chargeback_exposure': round(sum(
+            (f.get('estimated_chargeback_exposure') or 0)
+            for f in (critical_findings + suspicious_rejected)
+            if f.get('confidence') == 'Critical'
+        ), 2),
         'currency': currency,
         # The country the code was derived from. Country never reaches storage
         # otherwise, which is precisely why the four-month currency bug could
@@ -2958,8 +3031,19 @@ def build_action_es(action_code, n_successful, exposure, currency=DEFAULT_CURREN
     # Currency is the ISO code (USD, GTQ, ...). We render "USD 5,678.34"
     # rather than "$5,678.34" because `$` is ambiguous across Latin American
     # currencies (Mexico, Argentina, Chile all use $ for their local peso).
+    # `n_successful` and `exposure` describe the SUSPICIOUS settled charges,
+    # not the merchant's whole book. The text has to say so: an analyst told
+    # to "review the 412 successful charges" reads it as a day's work and
+    # deprioritises it, when the actual job is three transactions.
     if action_code == 'FREEZE_MERCHANT':
-        return f"Congelar cuenta del merchant y retener depósito. Revisar los {n_successful} cargos exitosos ({currency} {exposure:,.2f}) para exposición a chargebacks."
+        if n_successful == 0:
+            return ("Congelar cuenta del merchant y retener depósito. Ningún cargo "
+                    "sospechoso llegó a liquidarse, así que no hay exposición directa "
+                    "a chargebacks todavía — el patrón indica abuso de la cuenta.")
+        return (f"Congelar cuenta del merchant y retener depósito. Revisar los "
+                f"{n_successful} cargos sospechosos que sí se liquidaron "
+                f"({currency} {exposure:,.2f}) — esa es la exposición a chargebacks. "
+                f"No es necesario revisar el resto del historial del merchant.")
     elif action_code == 'REVIEW_CHARGE':
         return f"Revisar el cargo exitoso de {currency} {exposure:,.2f} — riesgo alto de chargeback por channel-switch retry."
     elif action_code == 'INVESTIGATE_RING':
