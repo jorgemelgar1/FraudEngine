@@ -58,17 +58,15 @@ Unprotect-BackupFile -InPath $Path -OutPath $tmp -Password $pw
 Write-Ok 'Opened.'
 
 try {
-    $parsed = Get-Content $tmp -Raw | ConvertFrom-Json
+    $summary = Get-BackupSummary -JsonPath $tmp
 
     Write-Step '2/3  What is inside'
-    Write-Host "  Taken at: $($parsed.meta.taken_at)"
-    Write-Host "  Format:   $($parsed.meta.format)"
-    $total = 0
-    foreach ($p in $parsed.meta.row_counts.PSObject.Properties) {
-        Write-Host ("    {0,-22} {1,7:N0} rows" -f $p.Name, $p.Value)
-        $total += $p.Value
+    Write-Host "  Taken at: $($summary.TakenAt)"
+    Write-Host "  Format:   $($summary.Format)"
+    foreach ($t in $summary.Tables) {
+        Write-Host ("    {0,-22} {1,7:N0} rows" -f $t.Name, $t.Count)
     }
-    Write-Ok "$total rows total."
+    Write-Ok "$($summary.TotalRows) rows total."
 
     if (-not $Apply) {
         Write-Step '3/3  Stopping here'

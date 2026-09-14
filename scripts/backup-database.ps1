@@ -161,11 +161,12 @@ Write-Step 'Verifying the backup opens'
 $check = Join-Path $resolvedRoot ".verify-$stamp.json"
 try {
     Unprotect-BackupFile -InPath $final -OutPath $check -Password $pw1
-    $parsed = Get-Content $check -Raw | ConvertFrom-Json
-    $total  = 0
-    foreach ($p in $parsed.meta.row_counts.PSObject.Properties) { $total += $p.Value }
-    Write-Ok "Opened cleanly. $total rows across $($parsed.meta.row_counts.PSObject.Properties.Count) tables."
-    Write-Ok "Taken at $($parsed.meta.taken_at)"
+    $summary = Get-BackupSummary -JsonPath $check
+    Write-Ok "Opened cleanly. $($summary.TotalRows) rows across $($summary.TableCount) tables."
+    foreach ($t in $summary.Tables) {
+        Write-Host ("      {0,-22} {1,7:N0} rows" -f $t.Name, $t.Count)
+    }
+    Write-Ok "Taken at $($summary.TakenAt)"
 } finally {
     Remove-FileSecurely -Path $check
 }

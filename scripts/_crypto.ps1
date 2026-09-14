@@ -303,6 +303,65 @@ function Invoke-NativeShow {
 }
 
 
+function Get-BackupSummary {
+    <#
+    .SYNOPSIS
+      Describe a decrypted dump: when it was taken, and how many rows per table.
+    .DESCRIPTION
+      Shared by backup-database.ps1 (verifying what it just wrote) and
+      restore-database.ps1 (reporting what it is about to write), which used
+      to carry two copies of this walk.
+
+      Every property access here is guarded, because `Set-StrictMode -Version
+      Latest` makes reading a property that does not exist a TERMINATING
+      error. A copy of this code crashed on `PSObject.Properties.Count` —
+      PSMemberInfoCollection has no .Count — and took the script down on its
+      last line, after a good 14 MB backup had already been written and
+      verified. The backup was fine; the sentence describing it was not.
+
+      Returns an object with TakenAt, Format, Tables (Name/Count pairs),
+      TableCount and TotalRows. Never throws on a well-formed dump.
+    #>
+    param([Parameter(Mandatory)][string]$JsonPath)
+
+    $parsed = Get-Content -LiteralPath $JsonPath -Raw | ConvertFrom-Json
+
+    $meta = $null
+    if ($parsed.PSObject.Properties.Match('meta').Count -gt 0) { $meta = $parsed.meta }
+
+    $takenAt = '(unknown)'
+    $format = '(unknown)'
+    $rowCounts = $null
+    if ($meta) {
+        if ($meta.PSObject.Properties.Match('taken_at').Count -gt 0) { $takenAt = $meta.taken_at }
+        if ($meta.PSObject.Properties.Match('format').Count -gt 0) { $format = $meta.format }
+        if ($meta.PSObject.Properties.Match('row_counts').Count -gt 0) { $rowCounts = $meta.row_counts }
+    }
+
+    # @() forces a real array. PSObject.Properties is a PSMemberInfoCollection,
+    # which has no .Count, and a single-property object would otherwise not be
+    # a collection at all.
+    $tables = @()
+    $total = 0
+    if ($rowCounts) {
+        foreach ($p in @($rowCounts.PSObject.Properties)) {
+            $count = 0
+            if ($null -ne $p.Value) { $count = [int]$p.Value }
+            $tables += [pscustomobject]@{ Name = $p.Name; Count = $count }
+            $total += $count
+        }
+    }
+
+    return [pscustomobject]@{
+        TakenAt    = $takenAt
+        Format     = $format
+        Tables     = $tables
+        TableCount = @($tables).Count
+        TotalRows  = $total
+    }
+}
+
+
 function Remove-FileSecurely {
     # The decrypted dump is the one moment card data touches this disk in the
     # clear. Delete alone only unlinks it - the bytes stay in the sectors until

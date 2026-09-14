@@ -95,6 +95,22 @@ none, so these files are the only copy - which is the argument for running
 | `restore_supabase.py` | Writes the rows back in |
 | `build_schema_baseline.py` | Rebuilds `supabase/schema-<tag>.sql` |
 
+## Checking the tooling still works
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests	est_backup_scripts.ps1
+python tests	est_backup_pipeline.py
+```
+
+The first covers the PowerShell half — encryption, secure delete, reading
+pasted input, and calling other programs. The second runs the dump and restore
+against a stand-in Supabase, so paging, ordering and upsert behaviour are
+exercised rather than assumed.
+
+Both exist because this tooling shipped untested and then failed four times on
+real use, each time in a different line of the same short script. Run them
+after touching anything in `scripts/`.
+
 `.cubobak` file layout: `CUBOBAK1` magic, PBKDF2 round count, 16-byte salt,
 16-byte IV, AES-256-CBC ciphertext, HMAC-SHA256 tag. Encrypt-then-MAC, with
 separate keys derived for encryption and authentication. Salt and IV are fresh
