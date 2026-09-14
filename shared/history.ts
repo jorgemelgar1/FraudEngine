@@ -42,9 +42,49 @@ export type Db = {
   rpc(fn: string, params?: Record<string, unknown>): any;
 };
 
-// Re-declared rather than imported: each app owns its own row types, and this
-// module only needs the fields it selects.
-export type ReviewReason = string;
+// Why an analyst dismissed something. The database stores the value; these
+// labels are what a person reads, so they belong beside the queries rather
+// than in whichever app happened to need them first (migration 0013).
+export const REVIEW_REASONS = [
+  { value: 'cliente_conocido', label: 'Cliente conocido' },
+  { value: 'campana_legitima', label: 'Campaña legítima' },
+  { value: 'prueba_interna',   label: 'Prueba interna' },
+  { value: 'error_detector',   label: 'Error del detector' },
+  { value: 'ya_gestionado',    label: 'Ya gestionado' },
+] as const;
+
+export type ReviewReason = typeof REVIEW_REASONS[number]['value'];
+
+export const REASON_LABELS: Record<string, string> =
+  Object.fromEntries(REVIEW_REASONS.map(r => [r.value, r.label]));
+
+// ── Is the engine any good? ──────────────────────────────────────────────────
+
+export type ReviewStats = {
+  decided: number;
+  confirmed: number;
+  dismissed: number;
+  /** Percent of decided Critical findings that were real. Null if none yet. */
+  precision: number | null;
+  by_reason: Record<string, number>;
+  pending: number;
+};
+
+/**
+ * How often a reviewed Critical finding turned out to be real.
+ *
+ * The one measure of the engine the team actually produces, and it comes free:
+ * every accept and dismiss is already a label. It is precision only — nothing
+ * here can see the fraud the engine never flagged, so a high number means
+ * "what we alerted on was usually right", not "we caught everything".
+ */
+export async function reviewStats(db: Db, since?: Date): Promise<ReviewStats | null> {
+  const { data, error } = await db.rpc('review_stats', {
+    p_since: since ? since.toISOString() : null,
+  });
+  if (error) throw new Error(`review_stats: ${error.message}`);
+  return (data as unknown as ReviewStats) || null;
+}
 
 // Everything the Historial screen reads: past analyses, their decisions, and
 // the watchlist those decisions produce.

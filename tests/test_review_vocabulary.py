@@ -1,7 +1,7 @@
 """Contract test: the dismissal reasons the app offers vs the ones the DB allows.
 
 The five reasons live in two places — a check constraint in migration 0013 and
-a const array in desktop/src/lib/findings.ts. If they drift, an analyst picks a
+a const array in shared/history.ts. If they drift, an analyst picks a
 reason, hits save, and gets a raw Postgres constraint violation for an answer.
 
 The reasons exist so "is the engine any good?" has data to answer from, so a
@@ -21,7 +21,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..'))
 
 _MIGRATION = os.path.join(_ROOT, 'supabase', 'migrations', '0013_review_reasons.sql')
-_FINDINGS_TS = os.path.join(_ROOT, 'desktop', 'src', 'lib', 'findings.ts')
+# REVIEW_REASONS moved to the repo root in 2026-09 so the web app shows the
+# same dismissal reasons the desktop does. Left pointing at the old path
+# this check would have failed loudly — which it did, correctly.
+_FINDINGS_TS = os.path.join(_ROOT, 'shared', 'history.ts')
 
 
 def _read(path):

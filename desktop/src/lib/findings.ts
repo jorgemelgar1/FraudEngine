@@ -1,9 +1,17 @@
 import { supabase } from './supabase';
+import { reviewStats as sharedReviewStats } from '@shared/history';
+// Re-exporting a type does not bring it into this module's own scope,
+// and reviewFindings() below takes one as a parameter.
+import type { ReviewReason } from '@shared/history';
 
 // Pure review logic lives at the repo root so the web app can apply the same
 // rules — it used to live here, which is why the browser queue could not show
 // re-openings, the seen count or a country tag. Re-exported rather than moved
 // outright so every existing import of this module keeps working unchanged.
+export {
+  REVIEW_REASONS, REASON_LABELS, type ReviewReason, type ReviewStats,
+} from '@shared/history';
+
 export {
   countryCodeOf, reopenInfo, type ReopenInfo,
   hoursSince, fmtAge, fmtDay, fmtCurrency,
@@ -115,18 +123,6 @@ export type ReviewResult = { id: string; ok: boolean; error?: string; result?: u
 // that earns its place: it separates "the engine was wrong" from "the engine
 // was right and we are fine with this merchant", and only the first of those
 // should ever move a threshold.
-export const REVIEW_REASONS = [
-  { value: 'cliente_conocido', label: 'Cliente conocido' },
-  { value: 'campana_legitima', label: 'Campaña legítima' },
-  { value: 'prueba_interna',   label: 'Prueba interna' },
-  { value: 'error_detector',   label: 'Error del detector' },
-  { value: 'ya_gestionado',    label: 'Ya gestionado' },
-] as const;
-
-export type ReviewReason = typeof REVIEW_REASONS[number]['value'];
-
-export const REASON_LABELS: Record<string, string> =
-  Object.fromEntries(REVIEW_REASONS.map(r => [r.value, r.label]));
 
 export const PENDING_LIMIT = 500;
 
@@ -215,28 +211,6 @@ export async function reviewFindings(
   return (data as unknown as ReviewResult[]) || [];
 }
 
-export type ReviewStats = {
-  decided: number;
-  confirmed: number;
-  dismissed: number;
-  /** Percent of decided Critical findings that were real. Null if none yet. */
-  precision: number | null;
-  by_reason: Record<string, number>;
-  pending: number;
-};
-
-/**
- * How often the engine is right, and what it gets wrong.
- *
- * Computed server-side (migration 0013) so both clients and anyone querying by
- * hand get the same arithmetic. Counts only findings a human actually decided
- * — pending ones are not evidence either way, and including them would make
- * the engine look worse every time the queue grew.
- */
-export async function reviewStats(since?: Date): Promise<ReviewStats | null> {
-  const { data, error } = await supabase.rpc('review_stats', {
-    p_since: since ? since.toISOString() : null,
-  });
-  if (error) throw new Error(`review_stats: ${error.message}`);
-  return (data as unknown as ReviewStats) || null;
-}
+// Bound to this app's client — see the note in history.ts about why the
+// shared version takes one as an argument.
+export const reviewStats = (since?: Date) => sharedReviewStats(supabase, since);

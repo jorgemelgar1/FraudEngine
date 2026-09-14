@@ -5,6 +5,10 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { describePattern, rankPatterns, verdictFor } from '@/shared/patterns';
+import {
+  reviewStats, changeDecision, REVIEW_REASONS, REASON_LABELS,
+  type ReviewStats,
+} from '@/shared/history';
 
 type HistoryFinding = {
   id: string;
@@ -94,6 +98,50 @@ export default function HistorialPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Precision only, and worth saying so on the screen: every accept and
+  // dismiss is already a label, but nothing here can see the fraud the engine
+  // never flagged. A high number means "what we alerted on was usually right",
+  // not "we caught everything".
+  const [stats, setStats] = useState<ReviewStats | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const supabase = createClient();
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+        setStats(await reviewStats(supabase));
+      } catch {
+        // Display-only. A missing panel is better than a blocked page.
+      }
+    })();
+  }, []);
+
+  // Overturn a decision after the undo window has closed. The database demands
+  // a written explanation (migration 0014) because this rewrites a record
+  // somebody else made, and now is the only useful moment to capture why.
+  async function change(findingId: string, newStatus: 'accepted' | 'rejected') {
+    const explanation = window.prompt(
+      `¿Por qué se cambia esta decisión a "${newStatus === 'accepted' ? 'aceptado' : 'descartado'}"?`);
+    if (explanation === null) return;
+    if (!explanation.trim()) {
+      setError('Hace falta una explicación para cambiar una decisión.');
+      return;
+    }
+    try {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) { router.push('/login'); return; }
+      await changeDecision(
+        supabase, findingId, newStatus,
+        session.user.id, session.user.email || '', explanation.trim(),
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function undo(findingId: string) {
     const supabase = createClient();
     const { data: { session } } = await supabase.auth.getSession();
@@ -163,6 +211,53 @@ export default function HistorialPage() {
 
       <div className="container">
         <div className="card">
+          {/* The only measure of the engine the team actually produces, and
+              it costs nothing: every accept and dismiss is already a label.
+              Labelled "de lo revisado" on purpose — it cannot speak to fraud
+              that was never flagged. */}
+          {stats && stats.decided > 0 && (
+            <div style={{
+              display: 'flex', gap: '1.5rem', flexWrap: 'wrap',
+              padding: '0.75rem 0', marginBottom: '0.75rem',
+              borderBottom: '1px solid var(--border, #333)',
+            }}>
+              <div>
+                <div className="muted" style={{ fontSize: '0.8rem' }}>¿El motor acierta?</div>
+                <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>
+                  {stats.precision == null ? '—' : `${Math.round(stats.precision)}%`}
+                </div>
+                <div className="muted" style={{ fontSize: '0.75rem' }}>
+                  de lo revisado era fraude real
+                </div>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: '0.8rem' }}>Confirmados</div>
+                <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>{stats.confirmed}</div>
+                <div className="muted" style={{ fontSize: '0.75rem' }}>de {stats.decided} decididos</div>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: '0.8rem' }}>Descartados</div>
+                <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>{stats.dismissed}</div>
+                {Object.keys(stats.by_reason || {}).length > 0 && (
+                  <div className="muted" style={{ fontSize: '0.75rem' }}>
+                    {Object.entries(stats.by_reason)
+                      .sort((a, b) => b[1] - a[1])
+                      .slice(0, 2)
+                      .map(([k, n]) => `${REASON_LABELS[k] || k}: ${n}`)
+                      .join(' · ')}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: '0.8rem' }}>Sin revisar</div>
+                <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>{stats.pending}</div>
+                <div className="muted" style={{ fontSize: '0.75rem' }}>
+                  <Link href="/pendientes">en la cola</Link>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
             <h2 style={{ margin: 0 }}>Historial de revisiones</h2>
             <div style={{ display: 'flex', gap: '0.4rem' }}>
@@ -291,9 +386,24 @@ export default function HistorialPage() {
                               Deshacer
                             </button>
                           ) : (
-                            <span className="muted" style={{ fontSize: '0.8rem' }}>
-                              bloqueado
-                            </span>
+                            /* Once the undo window closes the web app said
+                               "bloqueado" and stopped, which is a dead end
+                               rather than a rule: the desktop has always been
+                               able to overturn a decision here. The database
+                               allows it and demands a written explanation
+                               (migration 0014), so the record gains a reason
+                               instead of quietly changing. */
+                            <button
+                              className="signout"
+                              disabled={isBusy}
+                              onClick={() => change(
+                                f.id,
+                                f.review_status === 'accepted' ? 'rejected' : 'accepted',
+                              )}
+                              title={`Pasaron más de ${UNDO_WINDOW_HOURS}h: cambiar la decisión exige una explicación`}
+                            >
+                              Cambiar decisión
+                            </button>
                           )}
                         </td>
                       </tr>
