@@ -596,7 +596,8 @@ function CycleFacts({ cycle }: { cycle: RunnerCycle }) {
       <Pair label="Transacciones" value={
         run ? `${fmtNumber(run.unique_transactions)} únicas de ${fmtNumber(run.total_rows)} filas` : '—'
       } />
-      <Pair label="Exposición" value={
+      {/* Suspicious charges only — see the note in Analyzer.tsx. */}
+      <Pair label="Exposición · sospechosos" value={
         run ? fmtCurrency(run.chargeback_exposure_usd, run.chargeback_exposure_currency) : '—'
       } />
       <Pair

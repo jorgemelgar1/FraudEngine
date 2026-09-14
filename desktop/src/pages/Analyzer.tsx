@@ -344,7 +344,12 @@ function ReportView({
         <Kpi label="Hallazgos a monitorear" value={fmt(s.total_monitor_findings)}  accent="monitor" />
         <Kpi label="Sin liquidación"        value={fmt(s.total_suspicious_rejected_merchants)} accent="monitor" />
         <Kpi label="Fraude confirmado"      value={fmt(s.total_indicator_merchants)} accent="critical" />
-        <Kpi label="Exposición a chargebacks"
+        {/* Scoped to the charges the findings actually implicate, not every
+            settled charge at a flagged merchant. A shop taking a card-testing
+            attack is usually a victim with real trade, and summing that trade
+            in measured the merchant's success rather than the fraud. The label
+            names the scope so the smaller figure does not read as a fault. */}
+        <Kpi label="Exposición · cargos sospechosos"
              value={fmtCurrency(s.estimated_chargeback_exposure, currency)} />
       </div>
 
