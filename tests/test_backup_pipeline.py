@@ -200,6 +200,22 @@ def test_the_service_key_is_never_printed_in_full():
     assert 'sb_secret_wrong' not in r.stdout
 
 
+def test_a_failed_console_paste_is_explained_not_traced():
+    """Ctrl+V in the classic Windows console does not paste — it inserts the
+    control character 0x16. That reached urllib as the whole URL and came back
+    as a six-frame traceback ending in "unknown url type", thirty seconds and
+    two prompts after the actual mistake. The person running a backup needs to
+    be told what they did, not shown a stack."""
+    for bad in ('\x16', '', '   ', 'abcdefgh.supabase.co', 'abcdefgh'):
+        r = _run('dump_supabase.py',
+                 {'SUPABASE_URL': bad, 'SUPABASE_SERVICE_KEY': KEY,
+                  'DUMP_OUT': os.path.join(_TMP, 'bad-url.json')})
+        assert r.returncode == 1, 'accepted %r as a URL' % bad
+        assert 'Traceback' not in r.stderr, 'crashed on %r: %s' % (bad, r.stderr[-200:])
+        assert 'must be set' in r.stderr or 'is not a URL' in r.stderr, \
+            'unhelpful message for %r: %s' % (bad, r.stderr[-200:])
+
+
 def test_missing_credentials_are_refused_before_any_work():
     r = _run('dump_supabase.py', {'SUPABASE_URL': '', 'SUPABASE_SERVICE_KEY': '',
                                   'DUMP_OUT': os.path.join(_TMP, 'y.json')})

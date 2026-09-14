@@ -156,6 +156,70 @@ function Unprotect-BackupFile {
     } finally { $aes.Dispose() }
 }
 
+# ── Reading values a human typed or pasted ──────────────────────────────────
+#
+# In the classic Windows console host, Ctrl+V is NOT paste. It inserts the
+# control character 0x16 (SYN) and nothing else happens. The prompt looks like
+# it accepted something, the variable holds one invisible character, and the
+# failure surfaces much later somewhere unrelated — in the first version of
+# this script, as a Python traceback reading
+#
+#   ValueError: unknown url type: '\x16/rest/v1/analysis_runs?select=%2A'
+#
+# thirty seconds and two prompts after the mistake was made. Pasting works
+# there with a right-click, or with Ctrl+V in Windows Terminal and VS Code.
+#
+# Rather than explain that and hope, these helpers strip control characters
+# and check the value looks like what was asked for, at the prompt, while the
+# person is still standing at it.
+
+function Remove-ControlCharacters {
+    # Strip the invisible characters a failed console paste leaves behind.
+    param([string]$Value)
+    if ($null -eq $Value) { return '' }
+    return ($Value -replace '[\x00-\x1F\x7F]', '').Trim()
+}
+
+
+function Read-CheckedValue {
+    <#
+    .SYNOPSIS
+      Prompt until the answer passes `Validate`, or give up after `MaxTries`.
+    .DESCRIPTION
+      `Secret` hides typing. `Hint` is what the person is told when the value
+      does not pass — say what a good value looks like, not just "invalid".
+      Gives up rather than looping forever, so a redirected stdin (no console)
+      fails fast instead of spinning.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [scriptblock]$Validate,
+        [string]$Hint = '',
+        [switch]$Secret,
+        [int]$MaxTries = 3
+    )
+    for ($attempt = 1; $attempt -le $MaxTries; $attempt++) {
+        if ($Secret) {
+            $raw = ConvertFrom-SecureStringPlain (Read-Host $Prompt -AsSecureString)
+        } else {
+            $raw = Read-Host $Prompt
+        }
+        $value = Remove-ControlCharacters $raw
+
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            Write-Host '    Nothing came through. If you used Ctrl+V, try right-click to paste instead.' -ForegroundColor Yellow
+            continue
+        }
+        if ($Validate -and -not (& $Validate $value)) {
+            if ($Hint) { Write-Host "    $Hint" -ForegroundColor Yellow }
+            continue
+        }
+        return $value
+    }
+    throw "Gave up after $MaxTries attempts at: $Prompt"
+}
+
+
 # ── Running other programs without PowerShell killing the script ────────────
 #
 # Windows PowerShell 5.1 wraps every line a native program writes to stderr in

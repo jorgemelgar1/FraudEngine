@@ -47,6 +47,25 @@ def fail(msg):
     sys.exit(1)
 
 
+def check_base_url(base):
+    """Fail with a sentence, not a traceback, on a URL that cannot work.
+
+    A failed console paste leaves a single invisible control character behind
+    (Ctrl+V in the classic Windows console inserts 0x16 rather than pasting).
+    urllib's own complaint about that is a six-frame traceback ending in
+    "unknown url type", which tells the person running a backup nothing about
+    what they did or how to fix it.
+    """
+    if not base.startswith(('http://', 'https://')):
+        shown = repr(base) if base.strip() else '(empty)'
+        fail(
+            'SUPABASE_URL is not a URL: ' + shown + '\n'
+            '       It should look like https://abcdefgh.supabase.co\n'
+            '       If you pasted with Ctrl+V in a console window, that does '
+            'not paste - use right-click instead.'
+        )
+
+
 def post(base, key, table, rows, on_conflict):
     body = json.dumps(rows, default=str).encode('utf-8')
     url = f'{base}/rest/v1/{table}?on_conflict={on_conflict}'
@@ -72,6 +91,7 @@ def main():
     src  = os.environ.get('RESTORE_IN') or ''
     if not base or not key:
         fail('SUPABASE_URL and SUPABASE_SERVICE_KEY must be set.')
+    check_base_url(base)
     if not src:
         fail('RESTORE_IN must be set.')
 

@@ -82,15 +82,28 @@ if (Test-Path $envFile) {
     }
     if ($supaUrl -and $supaKey) { Write-Ok "Read from runner\.env (key $($supaKey.Substring(0,6))...)" }
 }
+if (-not $supaUrl -or -not $supaKey) {
+    Write-Host '  To paste in this window: right-click. Ctrl+V does not paste in' -ForegroundColor DarkGray
+    Write-Host '  the classic console - it inserts an invisible character instead.' -ForegroundColor DarkGray
+}
 if (-not $supaUrl) {
-    $supaUrl = Read-Host '  Supabase project URL (https://xxxx.supabase.co)'
+    $supaUrl = Read-CheckedValue `
+        -Prompt '  Supabase project URL (https://xxxx.supabase.co)' `
+        -Validate { param($v) $v -match '^https?://[^/\s]+\.[^/\s]+' } `
+        -Hint 'That does not look like a URL. It should start with https:// and look like https://abcdefgh.supabase.co'
 }
 if (-not $supaKey) {
     Write-Warn2 'The service-role key is not echoed as you paste it.'
-    $secureKey = Read-Host '  Supabase service-role key' -AsSecureString
-    $supaKey = ConvertFrom-SecureStringPlain $secureKey
+    # Real keys are either a long `eyJ...` JWT or `sb_secret_...`. Checking the
+    # shape here turns a mis-paste into one clear sentence now, instead of an
+    # HTTP 401 after the password prompts.
+    $supaKey = Read-CheckedValue `
+        -Prompt '  Supabase service-role key' -Secret `
+        -Validate { param($v) $v.Length -ge 20 -and $v -notmatch '\s' } `
+        -Hint 'That does not look like a full key. It should be one long unbroken string starting with eyJ or sb_secret_.'
 }
 if (-not $supaUrl -or -not $supaKey) { throw 'Both the project URL and the service-role key are required.' }
+$supaUrl = $supaUrl.TrimEnd('/')
 
 # ── Backup password ──────────────────────────────────────────────────────────
 Write-Step '2/4  Backup password'

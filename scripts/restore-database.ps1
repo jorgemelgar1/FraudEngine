@@ -95,8 +95,23 @@ try {
             }
         }
     }
-    if (-not $supaUrl) { $supaUrl = Read-Host '  Supabase project URL' }
-    if (-not $supaKey) { $supaKey = ConvertFrom-SecureStringPlain (Read-Host '  Supabase service-role key' -AsSecureString) }
+    if (-not $supaUrl -or -not $supaKey) {
+        Write-Host '  To paste in this window: right-click. Ctrl+V does not paste in' -ForegroundColor DarkGray
+        Write-Host '  the classic console - it inserts an invisible character instead.' -ForegroundColor DarkGray
+    }
+    if (-not $supaUrl) {
+        $supaUrl = Read-CheckedValue `
+            -Prompt '  Supabase project URL (https://xxxx.supabase.co)' `
+            -Validate { param($v) $v -match '^https?://[^/\s]+\.[^/\s]+' } `
+            -Hint 'That does not look like a URL. It should start with https:// and look like https://abcdefgh.supabase.co'
+    }
+    if (-not $supaKey) {
+        $supaKey = Read-CheckedValue `
+            -Prompt '  Supabase service-role key' -Secret `
+            -Validate { param($v) $v.Length -ge 20 -and $v -notmatch '\s' } `
+            -Hint 'That does not look like a full key. It should be one long unbroken string starting with eyJ or sb_secret_.'
+    }
+    $supaUrl = $supaUrl.TrimEnd('/')
 
     try {
         $env:SUPABASE_URL         = $supaUrl
