@@ -1,7 +1,7 @@
 """Contract test: every code the engine emits has plain Spanish in the app.
 
 The engine speaks in codes — `bin_diversity_burst`, `channel_switch_retry` —
-and desktop/src/lib/patterns.ts turns them into sentences an analyst can read.
+and shared/patterns.ts turns them into sentences an analyst can read.
 Nothing connects the two, so adding a detector to analyze.py and forgetting the
 dictionary puts a raw snake_case identifier in front of a human. It does not
 crash and it does not look like a bug; it looks like the tool is half-finished.
@@ -27,7 +27,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..'))
 
 _ENGINE = os.path.join(_ROOT, 'analyze.py')
-_PATTERNS_TS = os.path.join(_ROOT, 'desktop', 'src', 'lib', 'patterns.ts')
+# Moved to the repo root in 2026-09 so the web app could import it too.
+# It lived under desktop/ while its own header claimed "one dictionary,
+# both clients" — and .vercelignore excludes desktop/, so the web app
+# could not have imported it from there even if anyone had tried.
+_PATTERNS_TS = os.path.join(_ROOT, 'shared', 'patterns.ts')
 
 
 def _read(path):
@@ -74,7 +78,7 @@ def _ts_keys(block_name):
     """Top-level keys of an exported object literal in patterns.ts."""
     src = _read(_PATTERNS_TS)
     m = re.search(rf'export const {block_name}[^=]*=\s*\{{(.*?)\n\}};', src, re.S)
-    assert m, f'{block_name} is not declared in desktop/src/lib/patterns.ts'
+    assert m, f'{block_name} is not declared in shared/patterns.ts'
     return set(re.findall(r'^\s{2}([A-Za-z0-9_]+):', m.group(1), re.M))
 
 

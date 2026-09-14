@@ -5,7 +5,7 @@ import {
   listPending, reviewFindings, reopenInfo, countryCodeOf,
   REVIEW_REASONS, type PendingFinding, type ReviewReason,
 } from '../lib/findings';
-import { describePattern, rankPatterns, verdictFor, actionFor } from '../lib/patterns';
+import { describePattern, rankPatterns, verdictFor, actionFor } from '@shared/patterns';
 import { isNetworkError } from '../lib/offline';
 import { OfflineState } from '../components/OfflineState';
 

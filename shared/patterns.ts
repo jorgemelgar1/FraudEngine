@@ -1,5 +1,18 @@
 // Plain-Spanish names for everything the engine emits in codes.
 //
+// Why this lives at the repo root and not inside an app
+// ─────────────────────────────────────────────────────
+// It used to live in desktop/src/lib/, and the comment below already claimed
+// "one dictionary, both clients". That was the intent, not the fact: the web
+// app never had it, so analysts working in the browser read `card_fanout_burst`
+// where the desktop showed "Ráfaga de tarjetas" and an explanation. The
+// dictionary could not simply be imported across, either — .vercelignore
+// excludes desktop/, so a web build importing from there fails on Vercel and
+// not on anyone's laptop.
+//
+// At the root, both apps import it and neither owns it. Nothing here may
+// import from either app, or that breaks again.
+//
 // Why this lives in the app and not in analyze.py
 // ───────────────────────────────────────────────
 // The engine already writes Spanish, in build_description_es(). Three things

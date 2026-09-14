@@ -1,5 +1,9 @@
 {
   "compilerOptions": {
+    // Shared with the web app, which cannot import from desktop/ because
+    // .vercelignore excludes it. Mirrored in vite.config.ts.
+    "baseUrl": ".",
+    "paths": { "@shared/*": ["../shared/*"] },
     "target": "ES2020",
     "useDefineForClassFields": true,
     "lib": ["ES2020", "DOM", "DOM.Iterable"],

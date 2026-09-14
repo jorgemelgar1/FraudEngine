@@ -12,7 +12,7 @@ import {
   type AnalysisRun, type DecidedFinding,
   type WatchlistMerchant, type WatchlistCard, type WatchlistIndicator,
 } from '../lib/history';
-import { verdictFor, rankPatterns, describePattern } from '../lib/patterns';
+import { verdictFor, rankPatterns, describePattern } from '@shared/patterns';
 import { isNetworkError } from '../lib/offline';
 import { OfflineState } from '../components/OfflineState';
 
